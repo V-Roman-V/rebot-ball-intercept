@@ -136,6 +136,22 @@ class CameraServerTest(unittest.TestCase):
         self.assertIs(switch_mode(c2, 1280, 720, 30), c2)                     # already there: the same client
         c2.close()
 
+    def test_launcher_switches_and_stops_without_a_restart(self):
+        spec = importlib.util.spec_from_file_location("rig_launcher", ROOT / "scripts/real/rig.py")
+        rig = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rig)
+        rig.PORT = PORT
+        refuse = mock.Mock(side_effect=AssertionError("must not start a server (password)"))
+        with mock.patch.object(rig, "start_camera", refuse), mock.patch("builtins.print"):
+            self.assertEqual(rig.camera_mode(), (640, 480, 60))
+            self.assertTrue(rig.switch_camera(rig.HD))
+            self.assertEqual(rig.camera_mode(), rig.HD)
+            self.assertTrue(rig.ensure_camera())                       # running: nothing to start
+            self.assertTrue(rig.switch_camera(rig.VGA))
+            self.assertEqual(rig.camera_mode(), rig.VGA)
+            self.assertTrue(rig.stop_camera())
+            self.assertIsNone(rig.camera_mode())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
