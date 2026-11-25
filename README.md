@@ -20,10 +20,9 @@ Intel RealSense D435i.
 | Simulation: scripted interception from ground truth | ✅ 100/100 balls caught |
 | Simulation: vision in the loop (camera model + classic CV tracker) | ✅ 100/100, 2-3 mm error, robust to 30 fps / 100 ms latency |
 | Real arm: CAN link, joint readout, model match | ✅ |
-| Real arm: first powered motions (gripper, single joints) | ✅ |
-| Real camera: 60 fps stream, marker-based calibration to the robot frame | ✅ |
+| Real camera: 60 fps stream, located from table markers mapped in the arm's frame | ✅ 0.6 px, touches 1.7 mm |
 | Real tracking in shadow mode (arm unpowered) | 🔧 ready, being tested |
-| Gravity-compensated hold for joints 2-3, powered interception | ⏳ next |
+| Powered: jaw along the intercept line, interception (all joints, motor position mode) | 🔧 ready for the first runs |
 
 ## Repository layout
 
@@ -32,19 +31,22 @@ eaiproject/                     Python package
   ball_intercept_env.py         MuJoCo env, scripted InterceptPolicy, IK
   ball_tracker.py               camera calibration model + HSV/Kalman ball tracker
   tracked_intercept.py          sim camera model + tracker-driven policy
-  real_intercept.py             real rig: calibration loading, tracker setup, real-time planner
+  real_intercept.py             real rig: camera pose from the table map, tracker setup, real-time planner
+  rig_calib.py                  table map: markers and table plane in the arm's frame; camera relocalisation
+  rig_report.py, rig_draw.py    calibration report and drawing helpers
+  arm.py                        real arm: wrist zero, rest / initial poses, position-mode control
   robstride.py                  RobStride CAN protocol over PEAK PCAN-USB (with a motor allow-list)
   realsense_client.py           client for the RealSense frame server
-  kinematics.py, markers.py, calib_board.py   FK from joint readings, ArUco markers, ChArUco board
+  kinematics.py, markers.py     FK from joint readings, ArUco table markers
 scripts/
   sim/                          render_demo, eval_scripted, eval_tracked, live_tracking
-  real/                         hardware: checks, motion tests, camera server, calibration, tracking
-    legacy/                     older calibration method (ball touches)
+  real/                         the ./rig tasks (calibrate, check, track, move, catch, ...), camera server
+config/rig_map.json             the table map (written by ./rig calibrate)
+rig                             launcher for the real rig: ./rig help
 assets/rebot_b601_rs/           arm model (MJCF/URDF/meshes) from Seeed + our scene XML
 docs/
   simulation.md                 sim details, env API, results
-  real_rig.md                   hardware setup, step-by-step bring-up, safety, troubleshooting
-  charuco_board_A4.pdf          optional printable calibration board
+  real_rig.md                   hardware setup, calibration, powered runs, troubleshooting
 ```
 
 ## Quick start (simulation)
@@ -66,39 +68,30 @@ On a headless Linux machine, prefix rendering commands with `MUJOCO_GL=egl`. Mor
 
 ## Real rig
 
-Bring-up goes from read-only checks to powered motion, one level of risk at a time. The full guide,
-including the macOS-specific camera and CAN setup, is in [docs/real_rig.md](docs/real_rig.md).
+Everything runs through `./rig`. The full guide, including the macOS-specific camera and CAN setup,
+is in [docs/real_rig.md](docs/real_rig.md).
 
 ```bash
-# 1. read-only: is everything connected and does the arm match the model?
-.venv/bin/python scripts/real/gripper_test.py                  # all joint states
-.venv/bin/python scripts/real/joint_check.py --ranges          # move joints by hand, compare with the sim
-
-# 2. first powered motions (one motor at a time, asks before moving)
-.venv/bin/python scripts/real/gripper_test.py --move
-.venv/bin/python scripts/real/arm_motion_test.py               # joint 1 +15 deg and back
-
-# 3. camera (root frame server on macOS, then a live view)
-scripts/real/start_camera.sh
-.venv/bin/python scripts/real/camera_view.py
-
-# 4. calibration: camera pose from ArUco markers + fingertip touches, then the table height
-.venv/bin/python scripts/real/calibrate_markers.py
-.venv/bin/python scripts/real/table_height.py
-
-# 5. live tracking with the arm in shadow mode
-.venv/bin/python scripts/real/real_tracking.py
+./rig status             # camera server, CAN adapter, table map, arm poses, ball colour
+./rig arm                # joint states, read only
+./rig view               # the camera with the table markers, for aiming it
+./rig calibrate          # the table map once (markers + fingertip touches + sweep); daily: wrist zero, ball colour
+./rig check              # live check of the calibration
+./rig track              # ball tracking and the planned motion, arm NOT powered
+./rig move               # POWERED: the jaw along the intercept line at 60 / 35 / 20 mm
+./rig catch              # POWERED: the jaw follows the ball
 ```
 
-Calibration results, logs and camera frames are written to `outputs/`, which is git-ignored.
+The table map is committed (`config/rig_map.json`). Daily values, logs and camera frames are
+written to `outputs/`, which is git-ignored.
 
 ### Safety
 
-Every hardware script enables only the motors it moves; the CAN wrapper refuses commands to any other
-motor. Powered scripts stop and disable on tracking error, stall, faults, lost feedback, unexpected
-motion of other joints, Ctrl+C and exceptions. Joints 2 and 3 carry the arm's weight and drop when
-disabled, so they are not moved until a gravity-compensated hold exists. Read
-[docs/real_rig.md#safety-rules](docs/real_rig.md#safety-rules) before powering anything.
+The calibration and check tools open the CAN bus read-only: the wrapper refuses enable, command and
+parameter writes to any motor not allowed. The powered tasks use the motors' own position mode with
+a firmware speed limit and current cap, ask for ENTER before powering, and hold the arm on Ctrl+C
+until you support it and press ENTER to release. Joints 2 and 3 carry the arm's weight and drop when
+released. See [docs/real_rig.md#powered-runs](docs/real_rig.md#powered-runs).
 
 ## How it works
 
@@ -110,17 +103,18 @@ disabled, so they are not moved until a gravity-compensated hold exists. Read
 3. **Planning.** The open jaw (fingertips 20 mm above the table, tilted 30° down, turned to face the
    ball) is moved along the line with rate limits. Damped least-squares IK in the MuJoCo model gives
    the joint targets.
-4. **Calibration (real rig).** The camera pose comes from ArUco markers whose robot-frame positions are
-   measured by touching them with the arm's fingertips. Heights are relative to a table plane measured
-   the same way, which cancels the arm model's height bias.
+4. **Calibration (real rig).** A one-time table map holds the ArUco markers and the table plane in
+   the arm's frame, fitted to camera views, fingertip touches on marker corners and a fingertip sweep
+   of the table. Heights measured with the arm's own readings cancel its model's height bias. The
+   camera is then located from the markers wherever it stands.
 
 ## Contributing
 
 - Branch from `main`, keep pull requests focused, and describe how you tested the change (sim run,
   hardware run, or both).
 - Don't commit anything from `outputs/`: camera frames can show people in the lab.
-- Hardware changes: run the read-only checks first, and never bypass the motor allow-list in
-  `RobStrideBus`.
+- Hardware changes: check with `./rig arm` (read only) first, and never bypass the motor allow-list
+  in `RobStrideBus`.
 
 ## Credits and licenses
 

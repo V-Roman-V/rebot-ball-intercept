@@ -1,17 +1,16 @@
 # Real rig guide
 
-Everything needed to run the ball-interception pipeline on the physical reBot Arm B601-RS with an
-Intel RealSense D435i. The steps go from read-only checks to powered motion, one level of risk at a
-time. Do them in order the first time.
+Everything needed to run the ball interception on the physical reBot Arm B601-RS with an Intel
+RealSense D435i: setup, the calibration, and the powered runs. Every task starts with `./rig` from
+the repository root.
 
 - [Hardware](#hardware)
 - [Software setup](#software-setup)
-- [1. Check the arm (read-only)](#1-check-the-arm-read-only)
-- [2. First powered motions](#2-first-powered-motions)
-- [3. Camera](#3-camera)
-- [4. Calibration](#4-calibration)
-- [5. Live tracking (shadow mode)](#5-live-tracking-shadow-mode)
-- [Safety rules](#safety-rules)
+- [The launcher](#the-launcher)
+- [Calibration](#calibration)
+- [Checks and shadow tracking](#checks-and-shadow-tracking)
+- [Powered runs](#powered-runs)
+- [Validation experiment](#validation-experiment)
 - [Troubleshooting](#troubleshooting)
 - [Protocol notes](#protocol-notes)
 
@@ -21,19 +20,25 @@ time. Do them in order the first time.
 |---|---|
 | Arm | Seeed Studio reBot Arm B601-RS: RobStride RS06 motors on joints 1-3, RS00 on joints 4-6 and the gripper (CAN IDs 1-7, host ID 0xFD), 48 V supply |
 | CAN adapter | PEAK PCAN-USB (shows up as "XCAN-USB", USB 0c72:000c), 1 Mbit/s |
-| Camera | Intel RealSense D435i, USB 3, fixed on a stand looking at the table |
-| Markers | ArUco markers taped flat on the table (70 mm, `DICT_ARUCO_ORIGINAL`, IDs 107, 880, 467, 718) and on the arm's mounting plate (50 mm, `DICT_4X4_50`, IDs 0 and 2). Defined in `eaiproject/markers.py`. |
+| Camera | Intel RealSense D435i, USB 3, on a stand looking at the table; it may be moved between runs |
+| Markers | 4 or more ArUco markers taped flat on the table (`DICT_ARUCO_ORIGINAL`, IDs 107, 880, 467, 718, 71.5 mm black square). Defined in `eaiproject/markers.py` |
 | Ball | orange ping-pong ball, 44 mm |
 
-Tested on an Apple Silicon Mac. Linux should be simpler (no root needed for the camera, SocketCAN for
-the adapter), but the CAN transport in `eaiproject/robstride.py` currently opens the PCAN interface
-through python-can; on Linux change the interface in `RobStrideBus` if you use SocketCAN.
+Marker layout: at least 2 within the arm's reach (they get touched), at least 1 further than 0.50 m
+from the base (the camera cannot be located without one in view), not in a line, as far apart as
+the arm reaches. Each needs a white margin of 1 cm or more and no tape over the black border.
+Measure one printed marker with a ruler: it must match `SIZES` in `eaiproject/markers.py` within
+0.3 mm, because the camera measures every distance in units of the marker size.
+
+Tested on an Apple Silicon Mac. On Linux the camera needs no root, and `RobStrideBus` would need
+the SocketCAN interface instead of PCAN.
 
 ## Software setup
 
 ```bash
 python3.12 -m venv .venv                     # or: uv venv --python 3.12 .venv
 .venv/bin/pip install -r requirements.txt
+./rig test                                   # unit tests, no hardware
 ```
 
 **PCAN driver on macOS (no sudo).** python-can needs the free PCBUSB library from
@@ -46,147 +51,211 @@ tar xzf macOS_Library_for_PCANUSB_v0.13.tar.gz
 mkdir -p ~/lib && cp PCBUSB/libPCBUSB.0.13.dylib ~/lib/ && ln -sf ~/lib/libPCBUSB.0.13.dylib ~/lib/libPCBUSB.dylib
 ```
 
-**RealSense on macOS.** What we found:
+**RealSense on macOS.**
 
-- Use `pyrealsense2-macosx==2.54.2`. Version 2.56.5 segfaults when it lists devices.
-- librealsense must run as **root** on macOS. Root processes can't read `~/Documents` (macOS privacy
-  protection), so the camera runs as a small frame server from `~/realsense_tools` with its own venv.
-  `scripts/real/start_camera.sh` sets that up and starts it with a macOS password dialog, once per session.
+- librealsense must run as **root** on macOS, and root processes can't read `~/Documents`. So the
+  camera runs as a small frame server (`scripts/real/rs_server.py`) from `~/realsense_tools`, with
+  its own venv. `scripts/real/start_camera.sh` sets that up on first use and starts the server with
+  a macOS password dialog. `./rig` calls it when a task needs the camera.
+- The scripts switch the running server between 1280x720 @ 30 (calibration views) and 640x480 @ 60
+  (tracking) without a password.
+- Use `pyrealsense2-macosx==2.54.2`; 2.56.5 segfaults when it lists devices.
 - The colour stream only delivers frames while the depth stream is also enabled. The server does this.
-- Your terminal app (e.g. VS Code) needs macOS **Camera** permission for the plain-webcam fallback.
 
-## 1. Check the arm (read-only)
-
-Nothing is powered in this section. The CAN wrapper refuses enable / move / write commands to every
-motor that isn't explicitly allowed.
+## The launcher
 
 ```bash
-.venv/bin/python scripts/real/gripper_test.py            # prints all 7 joint states (position, velocity, current, bus voltage)
-.venv/bin/python scripts/real/joint_check.py --ranges --gripper
+./rig status             # camera server, CAN adapter, table map, arm poses, ball colour
+./rig camera start       # also: stop, hd (1280x720), vga (640x480)
+./rig view               # the camera with the table markers, for aiming it
+./rig arm                # joint states, read only: does the arm answer on CAN?
+./rig calibrate          # the table map once; daily: wrist zero, arm poses, ball colour
+./rig check              # live check of the calibration
+./rig track              # ball tracking and the planned motion; the arm is NOT powered
+./rig move               # POWERED: the jaw along the intercept line at 60 / 35 / 20 mm
+./rig catch              # POWERED: the jaw follows the ball
+./rig test               # unit tests
 ```
 
-`joint_check.py` opens a window with the MuJoCo arm BEFORE / AFTER a positive move of each joint and a
-live render of the sim posed at the real readings. Move each real joint by hand the way the picture
-shows: it reports the direction (sign), zero offset, cross-talk (a wrong CAN ID) and range against the
-model. Seeed's convention is q_model = q_motor, and the arm we tested matched it.
-`--live` just mirrors the real arm in the sim.
+Options after the task go to its script: `./rig calibrate --solve`, `./rig move --heights 40`,
+`./rig catch --help`.
 
-## 2. First powered motions
+## Calibration
+
+The calibration measures where the table markers and the table surface are **in the arm's own
+frame**: positions as the arm's model reports them from the joint readings (`Fingertip`, MuJoCo FK).
+That model reads heights 8-15 mm off, but since the planner commands the arm through the same
+model, the error cancels. With the map, the camera can stand anywhere: every tool finds the camera
+pose from the markers when it starts.
 
 ```bash
-.venv/bin/python scripts/real/gripper_test.py --move                # gripper only: open 2.5 rad, close 0.2 rad
-.venv/bin/python scripts/real/arm_motion_test.py --dry-run          # all checks, nothing enabled
-.venv/bin/python scripts/real/arm_motion_test.py                    # joint 1: +15 deg and back
+./rig calibrate          # continues the latest session; with a map it opens at the daily steps
+./rig calibrate --new    # new table map: the table or a marker moved
+./rig calibrate --solve  # solve again from the saved data, no hardware
 ```
 
-- `gripper_test.py --move` powers only the gripper: MIT mode, low gains (kp 5, kd 0.5), at most 1 rad/s,
-  aborts on tracking error, torque, faults or lost feedback. It asks before moving.
-- `arm_motion_test.py` powers ONE joint (1, 4, 5 or 6) in the motor's position mode, with the firmware
-  speed limit (0.33 rad/s) and current cap set before enabling. It checks limits and collisions in the
-  model first, aborts on tracking error, stall, or any other joint moving, and restores the motor
-  parameters afterwards. Joints 2 and 3 are refused: they carry the arm's weight, so they need a
-  gravity-compensated hold first (not written yet).
+| step in the window | arm | time | when |
+|---|---|---|---|
+| 1 Views: the camera at 5 or more positions | not needed | 5 min | table map |
+| 2 Touch: fingertips on marker corners | unpowered, moved by hand | 8 min | table map |
+| 3 Sweep: fingertips slid over the table | unpowered, moved by hand | 5 min | table map |
+| Solve: result on screen, map and report written | not needed | 10 s | table map |
+| 4 Arm: wrist zero; rest and initial poses | unpowered, moved by hand | 1 min | every day |
+| 5 Ball: the ball colour at the tracking size | not needed | 1 min | when the light or the ball changed |
 
-Measured on our arm: joint 1 reached +15.2 deg (target 15), returned within 0.01 deg, 1.9 A peak.
+ENTER goes to the next step, BACKSPACE back, `1`-`5` jump, `q` quits. Everything is saved as it is
+recorded, so you can quit at any time and continue later. Nothing is powered: the CAN bus is opened
+read-only. Support the unpowered arm while moving it: joints 2 and 3 drop.
 
-## 3. Camera
+### Table map (steps 1-3, once)
+
+**1 Views.** Arm and hands away from the markers. Put the camera somewhere, wait until it is still,
+SPACE (30 frames are averaged). Move it and repeat: at least 5 views, better 6-8, from the left,
+right and front, low (about 30°) to high (about 60°), near and far. Each view needs 3 or more
+markers. A view is refused if the corners moved more than 0.5 px while averaging.
+
+**2 Touch.** The window circles one corner in yellow (TL, TR, BR, BL; TL has the filled dot). Rest
+the **closed** fingertips on exactly that corner, pressed on the table, hold still, SPACE. Any
+gripper angle. After the 4 corners `n` goes to the next marker (`p` back); pass the ones you cannot
+reach with `n`. Touch all 4 corners of **at least 2 markers**, 3 if possible. A red `CHECK:` line
+means the point does not fit the others (wrong corner, tip off the table): `u` and touch it again.
+
+**3 Sweep.** **Hold SPACE** and slide the closed fingertips slowly over the table, at any gripper
+angle (if holding the key does not record, `r` toggles recording). Cover the yellow box around the
+intercept line to 70 % or more, then the table around it. `u` removes the last stroke. Samples where
+the tip left the table are found and dropped by the solve; the report says how many.
+
+**Solve.** ENTER after step 3 solves, writes `config/rig_map.json` and the report in
+`outputs/rig_calib/<date>/report/`, and shows the result. Commit the map when it is clean.
+
+| in the report | accept | if not |
+|---|---|---|
+| reprojection RMS | < 1.5 px (expect 0.3-0.7) | `report/reproj_view_XX.png`: one bad view, record the views again; all bad, a marker lifted off the table |
+| corner touches RMS | < 5 mm (expect 2-3) | `report.txt` lists every touch: redo the ones marked `<-- check` (step 2: select the marker with `n`, `u`, SPACE) |
+| scale check | within ±0.5 % | the printed markers are not the size in `markers.py` |
+| sweep RMS | < 1.5 mm | `report/sweep_heatmap.png`: random speckle = lifted tip, sweep again; a smooth trend = arm model error |
+| warnings | none | each says what to do |
+
+Our 2026-11-25 map: 0.64 px reprojection, corner touches 1.7 mm in the table plane, sweep 1.4 mm,
+table 5.4-5.7 mm (model frame) along the intercept line. The heights depend on the arm pose by
+about 1-2 mm: a joint-level model error, left to the arm parameter calibration.
+
+### Daily steps (4 and 5)
+
+**4 Arm.** Three parts: `n` / `p` move between them, SPACE records, `u` goes back to the saved value.
+ENTER keeps what is saved. Saved to `outputs/calibration/arm.json` (local, like the ball colour).
+
+1. **Wrist level** (every day: the gripper is remounted). Open the jaw a few cm by hand and rest
+   **both** fingertips on the table, fingers forward and down (not straight down), SPACE; then at a
+   second spot. The readings should agree within about 1°. Both fingertips touching means the jaw
+   is level, which gives the zero of joint 6 (the wrist roll; ours read about 15° off). Joint 6
+   turns about the finger axis and the fingertip lies on that axis, so the zero moves no fingertip
+   position (the map stays valid); it rolls the jaw, which matters at the blocking pose.
+2. **Rest** (when it should change). Fold the arm into the pose where it lies on itself without
+   support, SPACE. The powered tasks end here and release the motors here.
+3. **Initial** (when it should change). Hold the arm where its work should start from: above the
+   table, clear of the markers and the camera, SPACE. The powered tasks pass through it on the way
+   to their work and back.
+
+**5 Ball.** The camera switches to the tracking size. Put the ball **alone** on the table, still,
+hands away, `a` tunes the colour. Roll it: the green ring must follow it, the mask (bottom right)
+must show only the ball. The sliders in the "ball colour" window fine-tune it (raise S lo / V lo if
+the table or skin shows up, lower them if the ball breaks up in shadow). Leaving the step saves a
+changed colour to `outputs/calibration/ball_hsv.json`.
+
+## Checks and shadow tracking
 
 ```bash
-scripts/real/start_camera.sh                  # 640x480 @ 60 fps; password dialog once per session
-.venv/bin/python scripts/real/camera_view.py  # live view: grid, ball blobs, detected markers; s = snapshot
+./rig check --label camA   # live check, arm unpowered (or off)
+./rig track                # ball tracking, arm not powered
 ```
 
-Aim the camera so it sees the arm, the area in front of it (the intercept line is 0.40 m from the
-base) and the table out to where the ball is launched, with all markers detected. Then fix the camera
-firmly: the calibration is only valid for that pose and that resolution.
+Both locate the camera from the markers when they start (hands and arm off the markers for a
+second) and again when you press `c`, after the camera was moved.
 
-Stop the server with
-`.venv/bin/python -c "from eaiproject.realsense_client import RealSenseClient as C; C().stop_server()"`.
-It also stops after 30 minutes without clients.
+`./rig check` shows the map (magenta) over the detected markers (green), with the error per marker;
+a magenta ring at the arm's reported fingertip, which should sit on the real fingertips as you move
+the unpowered arm (rest them on a marker corner: the error shows, SPACE records it); and with `b`,
+the tracked ball against known points (marker centres, and spots added with `t`). Accept: markers
+< 1.5 px and < 5 mm, fingertip on a corner < 5 mm, ball on a known point < 5 mm. Records go to
+`outputs/calibration/validation.csv`, `s` saves a screenshot.
 
-## 4. Calibration
+`./rig track` shows the detection, the track, the predicted crossing of the intercept line, where
+the jaw would go, and a render of the pose the planner would command. Each roll is scored: the
+crossing predicted 0.5 / 0.3 / 0.15 s before the line against where the ball really crossed (the
+open jaw catches within about ±28 mm). A red **CAMERA MOVED?** means the markers no longer sit where
+the pose says: press `c`.
 
-**Camera pose, with the markers** (no measuring tape):
+| message | do |
+|---|---|
+| `camera located: OK` (< 1.5 px, < 5 mm) | go on |
+| `camera located: WARN` (1.5-3 px) | usable; check that the camera is fixed, press `c` |
+| `CANNOT LOCATE THE CAMERA: only N map marker(s) visible` | move the camera closer or higher: 3 markers must be read |
+| `CANNOT LOCATE THE CAMERA: no marker far from the arm` | aim further down the table |
+| `marker [...] does not fit the map` | it moved on the table: fine for today (left out), calibrate again before relying on it |
+
+## Powered runs
 
 ```bash
-.venv/bin/python scripts/real/calibrate_markers.py
+./rig move               # the jaw along the intercept line at 60, 35 and 20 mm above the table
+./rig move --heights 60  # one high pass first
+./rig catch              # the jaw follows the ball
 ```
 
-1. Hands and arm away from the markers, SPACE: the camera records every marker's corners.
-2. For each marker (yellow circle): rest the closed fingertips of the unpowered arm on the marker's
-   centre, SPACE. At least 3 markers, ideally the two plate markers and the two table markers next to
-   the arm; `s` skips one you can't reach.
-3. The script fits the camera pose, each marker's rotation and small touch errors to all marker corners,
-   and shows a 10 cm table grid over the image to check.
+Both scripts power all six arm joints in the motors' own position mode and go
+**rest → initial pose → their work → initial pose → rest**, then release the motors. Without
+recorded poses they start and end where the arm was resting.
 
-Result on our rig: 0.4-0.5 px fit error on the table markers. The camera sees the full ±25 cm lane
-from x = -0.08 to 0.98 m.
+- **ENTER** powers the arm. Before it, the arm should be at rest and the workspace clear.
+- **Ctrl+C** (in the terminal) holds the arm where it is. **Support the arm**, then ENTER releases
+  it: joints 2 and 3 drop when released. A second Ctrl+C releases at once. An error holds and
+  asks the same way.
+- The protection is the motors' own: a firmware speed limit (0.8 rad/s; `catch --joint-speed`,
+  default 1.5) and a current cap per joint (6 / 18 / 14 / 5 / 4 / 4 A), written to RAM before
+  enabling (gone at power-off; nothing goes to the motors' flash). There are no software stop
+  checks: keep a hand near the arm's power switch.
 
-**Table height where the arm works:**
+`./rig move` poses the jaw as when blocking and passes it along the intercept line (x = 0.40 m),
+highest first, alternating direction, then lifts before going back. It prints the fingertip's
+height above the table at the start and end of each pass: check it with a ruler.
 
-```bash
-.venv/bin/python scripts/real/table_height.py
-```
+`./rig catch` locates the camera, then after ENTER waits at the intercept line and follows the
+planner on the tracked ball, one target per camera frame. Open the jaw by hand first (the gripper
+motor is not powered). `q` in the window finishes, `r` resets the tracker. Commands and ball states
+are saved to `outputs/hardware/catch_<time>.npz`.
 
-Touch the table with the fingertips at the yellow circles along the intercept line, with the gripper
-tilted like the blocking pose. The arm's model reads heights 8-15 mm too high (table at +6 mm, plate
-at +9 mm in its frame, though the base stands on the plate). So the planner commands heights relative
-to this measured plane, and the model error cancels.
+The planner (`eaiproject/real_intercept.py`) is the simulation's policy in real time: straight-line
+crossing prediction, the jaw facing the ball, rate limits on the jaw pose (0.6 m/s sideways), IK in
+the MuJoCo model, heights from the measured table plane.
 
-Alternatives: `make_calib_board.py` + `calibrate_board.py` use a printed ChArUco board
-([docs/charuco_board_A4.pdf](charuco_board_A4.pdf), print at 100 %) with 4 corner touches.
-`legacy/calibrate_ball.py` uses the ball itself (place it, touch its top).
+## Validation experiment
 
-## 5. Live tracking (shadow mode)
+3 camera positions × 5 ball positions with known coordinates, error in mm in the arm frame.
 
-```bash
-.venv/bin/python scripts/real/real_tracking.py
-```
+1. Once: in `./rig check`, rest the fingertips on 2 spots on the intercept line (e.g. y = ±0.15),
+   press `t` at each and mark it with a pen dot. The 5 ball positions are these 2 dots and the
+   centres of 3 markers.
+2. For each camera position (front, left, right and higher): move the camera,
+   `./rig check --label camA` (`camB`, `camC`), touch 2 marker corners (SPACE each), then `b` and
+   the ball on each of the 5 points (SPACE each), `s` for a screenshot.
+3. The rows are in `outputs/calibration/validation.csv`. A ball on a marker centre tests locating
+   the camera; a ball on a pen dot and the corner touches also test the map in the arm frame.
+   Pass: mean error < 5 mm for every camera position, no systematic shift between them.
 
-The arm is not used at all. The window shows:
-
-- the detection, track and velocity,
-- the intercept line and the predicted crossing,
-- where the open gripper would go,
-- a MuJoCo render of the pose the planner would command.
-
-Each roll is scored: the predicted crossing 0.5 / 0.3 / 0.15 s before the line against where the ball
-really crossed (gripper margin ±28 mm).
-
-Keys: `a` auto-tunes the ball colour (ball alone on the table), `w` saves it, `h` toggles the mask
-inset, `r` resets the tracker. The HSV window has sliders.
-
-The planner (`eaiproject/real_intercept.py`) is the sim policy in real time:
-
-- straight-line crossing prediction,
-- the jaw facing the ball,
-- rate limits on the jaw pose (0.6 m/s sideways, slower than in the sim),
-- IK in the MuJoCo model,
-- heights from the measured table plane.
-
-**Next (not done yet):** a gravity-compensated hold for joints 2-3, a slow powered move to the
-intercept pose, then closed-loop blocking with slow rolls.
-
-## Safety rules
-
-- Run the read-only checks after any change to wiring, firmware or zero positions.
-- Joints 2 and 3 drop when disabled. Support the arm whenever it is unpowered and away from rest.
-- Every powered script enables only the joints it moves. It aborts and disables on tracking error,
-  stall/torque, faults, lost feedback, unexpected motion of other joints, Ctrl+C and exceptions.
-- Motor parameter writes are RAM-only (type 18). Nothing is saved to the motors' flash.
-- Keep a hand on the arm's power switch during powered tests.
+`outputs/` is not in git, and its camera frames can show people: copy only the reports, the CSV
+and the screenshots you need.
 
 ## Troubleshooting
 
 | symptom | cause / fix |
 |---|---|
-| `No motor answered` / `transmit queue is full` | arm power off, or CAN cable not connected (no node ACKs the frames) |
+| `No motor answered` / `transmit queue is full` / joints not answering | arm power off, or the CAN cable is not connected |
 | `PcanCanInitializationError ... handle is invalid` | the PCAN-USB adapter is unplugged |
-| camera server: `failed to set power state` | another (stuck) server holds the camera. `start_camera.sh` kills the old one by PID; if it persists, unplug and replug the camera |
-| camera server: `Frame didn't arrive` | the camera re-enumerated. Replug it and restart the server |
-| colour stream gives no frames | depth must be enabled too (the server does this) |
-| small markers not detected | too small / too edge-on in the image. Move the camera closer or higher. The plate markers are 4x4, not ArUco-original. |
-| fingertip reads ~50-60 mm on top of the 44 mm ball | known model height bias. Use `table_height.py` (see above) |
+| camera server: `failed to set power state` | another program holds the camera: quit video apps, replug the camera, start again. A stuck earlier server is killed by `start_camera.sh` itself |
+| camera server: `Frame didn't arrive` | the camera re-enumerated: replug it, `./rig camera stop`, start again |
+| `the camera server did not switch` | `./rig camera stop`, then the task again |
+| small markers not detected | too small or too edge-on in the image: move the camera closer or higher |
+| ball not found | tune the colour: `./rig calibrate --step ball` |
 
 ## Protocol notes
 
@@ -205,3 +274,6 @@ kp 0-500, kd 0-5. The torque ranges match the motors' own `limit_torque` paramet
 Useful parameters: 0x7005 run_mode (0 MIT, 1 position), 0x7016 loc_ref, 0x7017 limit_spd,
 0x7018 limit_cur, 0x7019 mechPos, 0x701A iqf, 0x701B mechVel, 0x701C VBUS.
 The gripper travel is 0 (closed) to 5.0 rad (open), from Seeed's config.
+
+`RobStrideBus(movable=...)` refuses enable / command / parameter writes to any motor not listed:
+the calibration and check tools open it with `movable=()`, the powered tasks with the six arm joints.
