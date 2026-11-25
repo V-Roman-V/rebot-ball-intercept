@@ -1,5 +1,5 @@
-"""The real arm: zero corrections and poses (config/arm.json), a read-only joint stream for the
-calibration, and the motors' own position mode for the powered scripts.
+"""The real arm: zero corrections and poses (outputs/calibration/arm.json), a read-only joint stream
+for the calibration, and the motors' own position mode for the powered scripts.
 
     q_model = q_motor + offset            (per joint, rad; outside this module every angle is a MODEL angle)
 
@@ -11,7 +11,8 @@ correction moves no fingertip position: it only turns the jaw.
 Two poses, stored as MOTOR readings so they stay right when the offset is measured again:
     rest     the arm lies on itself without support: it is released there
     initial  where the arm goes before its work and comes back to after it
-Both are recorded by ./rig calibrate (step 4).
+Both are recorded by ./rig calibrate (step 4). The file is local (git-ignored), like the ball colour:
+the wrist zero is measured again every day, and the last values stay the defaults.
 
 Safety is the motors' own: position mode with a firmware speed limit and current cap (RAM-only
 parameter writes, gone at power-off). `powered()` asks for ENTER before enabling; Ctrl+C holds the
@@ -32,7 +33,7 @@ import numpy as np
 from .robstride import ARM_IDS, P_MECHPOS, P_RUN_MODE
 
 ROOT = Path(__file__).resolve().parents[1]
-PATH = ROOT / "config" / "arm.json"
+PATH = ROOT / "outputs" / "calibration" / "arm.json"
 ROLL = 5                                  # index of joint 6, the wrist roll (turns about the finger axis)
 FINGER_OPEN_AXIS = 1                      # the fingers open along gripper_end's y axis (model)
 
@@ -44,7 +45,7 @@ MOVE_SPEED = 0.3                          # rad/s, peak joint speed of go() (mov
 RATE = 50.0                               # Hz, go() streams its targets at this rate
 
 
-# ------------------------------------------------------------------------------ config/arm.json
+# ------------------------------------------------------------------------------------ arm.json
 @dataclass
 class ArmConfig:
     offset: np.ndarray = field(default_factory=lambda: np.zeros(6))     # rad, q_model = q_motor + offset
@@ -88,7 +89,7 @@ class ArmConfig:
 
 
 def load(path=None) -> ArmConfig:
-    """config/arm.json; no file = no correction and no poses."""
+    """The saved arm config; no file = no correction and no poses."""
     path = Path(path or PATH)
     return ArmConfig.from_json(json.loads(path.read_text())) if path.exists() else ArmConfig()
 

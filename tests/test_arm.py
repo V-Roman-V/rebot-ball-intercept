@@ -1,4 +1,4 @@
-"""eaiproject/arm.py without hardware: config/arm.json, the wrist zero from a level reading, and the
+"""eaiproject/arm.py without hardware: the arm config file, the wrist zero from a level reading, and the
 position-mode arm on a fake CAN bus (enable, moves, the powered route, Ctrl+C).
 
     .venv/bin/python -m unittest tests.test_arm -v

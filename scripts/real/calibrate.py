@@ -434,7 +434,7 @@ def arm_summary(cfg: arm_mod.ArmConfig) -> list[str]:
 
 
 def run_arm(cam, arm, sess: Path) -> str:
-    """Step 4: wrist zero, rest pose and initial pose -> config/arm.json (saved after every record)."""
+    """Step 4: wrist zero, rest pose and initial pose -> arm.json (saved after every record)."""
     R = arm_mod.ROLL
     cfg = arm_mod.load()
     plane = table_plane()

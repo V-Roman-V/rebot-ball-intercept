@@ -140,7 +140,7 @@ def arm_states() -> int:
         return 1
     qm = arm_mod.load().to_model(q)
     p = Fingertip()(qm)
-    print("model angles (deg, with config/arm.json's zero corrections): " + " ".join(f"{np.degrees(v):+.1f}" for v in qm))
+    print("model angles (deg, with the wrist zero correction): " + " ".join(f"{np.degrees(v):+.1f}" for v in qm))
     above = ""
     if rc.MAP_PATH.exists():
         above = f", {(p[2] - rc.plane_z(rc.RigMap.load(rc.MAP_PATH).plane, p[0], p[1])) * 1000:.0f} mm above the table"
@@ -154,7 +154,7 @@ def status() -> int:
     from eaiproject.real_intercept import hsv_saved_time
     cur = camera_mode()
     print(f"camera   {'server running at ' + fmt(cur) if cur else 'server not running (./rig camera start)'}")
-    print(f"arm      {can_adapter()}  (./rig arm reads the joints)")
+    print(f"CAN      {can_adapter()}  (./rig arm reads the joints)")
     if rc.MAP_PATH.exists():
         m = rc.RigMap.load(rc.MAP_PATH)
         line = [rc.plane_z(m.plane, rc.GATE_X, y) * 1000 for y in (-0.24, 0.0, 0.24)]
@@ -167,10 +167,10 @@ def status() -> int:
     cfg = arm_mod.load()
     if cfg.time:
         rec = [n for n, q in (("rest", cfg.rest), ("initial", cfg.initial)) if q is not None]
-        print(f"poses    config/arm.json: wrist zero {np.degrees(cfg.offset[arm_mod.ROLL]):+.1f} deg "
+        print(f"arm      wrist zero {np.degrees(cfg.offset[arm_mod.ROLL]):+.1f} deg "
               f"({cfg.info.get('level_time', 'not measured')}), poses: {', '.join(rec) or 'none'}")
     else:
-        print("poses    none (./rig calibrate, step 4): the powered tasks start and end where the arm rests")
+        print("arm      no wrist zero, no poses (./rig calibrate, step 4): the powered tasks start and end where the arm rests")
     when = hsv_saved_time()
     print(f"ball     colour {'saved ' + when if when else 'default (./rig calibrate, step 5)'}")
     sess = rc.latest_session()
