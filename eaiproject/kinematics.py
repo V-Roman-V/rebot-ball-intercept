@@ -12,8 +12,8 @@ SCENE = Path(__file__).resolve().parents[1] / "assets/rebot_b601_rs/mjcf/ball_in
 class Fingertip:
     """Fingertip point (gripper_end origin, as in BallInterceptEnv) for arm joint angles q (rad, joints 1-6).
 
-    Assumes q_model = q_motor (Seeed's convention, checked with scripts/real/joint_check.py).
-    After a call, `self.d.xmat[self.body]` holds the gripper orientation.
+    Takes MODEL joint angles: eaiproject.arm adds the zero corrections of config/arm.json to the
+    motor readings. After a call, `self.d.xmat[self.body]` holds the gripper orientation.
     """
 
     def __init__(self):
