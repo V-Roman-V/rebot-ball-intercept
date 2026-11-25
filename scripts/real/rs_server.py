@@ -9,7 +9,8 @@ Protocol (TCP, 127.0.0.1 only):
     server -> client, once:  one JSON line: {"width","height","fps","K","dist","serial"}
     server -> client, per frame: header struct "<QddII" (frame_number, hw_timestamp_ms,
         host_monotonic_s at arrival, width, height) followed by width*height*3 bytes BGR.
-    client -> server: b"quit\n" stops the server.
+    client -> server: b"quit\n" stops the server; b"mode W H FPS\n" restarts the stream at that size
+        (no password needed) and disconnects every client, so they reconnect and read the new header.
 Slow clients just get the newest frame (older ones are dropped). The server exits after
 --idle-exit minutes without clients.
 """
@@ -20,6 +21,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import threading
 import time
 
@@ -35,6 +37,7 @@ class Latest:
         self.item = None
         self.seq = 0
         self.stop = False
+        self.mode_req = None              # (width, height, fps) asked for by a client
 
     def put(self, item):
         with self.cond:
@@ -42,7 +45,7 @@ class Latest:
             self.cond.notify_all()
 
 
-def serve_client(conn: socket.socket, latest: Latest, header: bytes, clients: list):
+def serve_client(conn: socket.socket, latest: Latest, header: list, clients: list):
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     conn.settimeout(None)
 
@@ -57,12 +60,16 @@ def serve_client(conn: socket.socket, latest: Latest, header: bytes, clients: li
                     with latest.cond:
                         latest.cond.notify_all()
                     return
+                for line in data.split(b"\n"):
+                    w = line.split()
+                    if len(w) == 4 and w[0] == b"mode" and all(v.isdigit() for v in w[1:]):
+                        latest.mode_req = tuple(int(v) for v in w[1:])
         except OSError:
             return
 
     threading.Thread(target=reader, daemon=True).start()
     try:
-        conn.sendall(header)
+        conn.sendall(header[0])
         seen = 0
         while not latest.stop:
             with latest.cond:
@@ -84,17 +91,17 @@ def main():
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--port", type=int, default=8770)
-    ap.add_argument("--idle-exit", type=float, default=30.0, help="minutes without clients before exiting")
+    ap.add_argument("--idle-exit", type=float, default=120.0, help="minutes without clients before exiting")
     ap.add_argument("--exposure", type=float, default=0, help="manual colour exposure in us (0 = auto)")
     args = ap.parse_args()
 
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "rs_server.pid"), "w") as fh:
         fh.write(str(os.getpid()))
 
-    def start():
+    def start(width=args.width, height=args.height, fps=args.fps):
         p, c = rs.pipeline(), rs.config()
-        c.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, args.fps)   # macOS: colour needs depth on
-        c.enable_stream(rs.stream.color, args.width, args.height, rs.format.bgr8, args.fps)
+        c.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, fps)        # macOS: colour needs depth on
+        c.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         pr = p.start(c)
         p.wait_for_frames(5000)                  # make sure frames actually arrive
         return p, pr
@@ -102,27 +109,46 @@ def main():
     try:
         pipe, prof = start()
     except RuntimeError as e:
-        # A crashed earlier session can leave the camera stuck: hardware-reset it and retry once.
-        print(f"start failed ({str(e).strip().splitlines()[0]}); resetting the camera", flush=True)
+        # Usually macOS's camera services hold the camera (VDCAssistant / cameracaptured claim every camera
+        # once any app looks for one); sometimes a crashed earlier session left it stuck. This process is
+        # root: stop those services (macOS restarts them when an app needs a camera), reset, retry once.
+        print(f"start failed ({str(e).strip().splitlines()[-1]}); freeing the camera from macOS's camera "
+              "services and retrying", flush=True)
         try:
             pipe.stop()  # noqa: F821  (only if start() got that far)
         except Exception:  # noqa: BLE001
             pass
-        devs = rs.context().query_devices()
-        if len(devs):
-            devs[0].hardware_reset()
-        time.sleep(6.0)
-        pipe, prof = start()
-    dev = prof.get_device()
-    intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-    color_sensor = [s for s in dev.query_sensors() if s.get_info(rs.camera_info.name) == "RGB Camera"][0]
-    if args.exposure > 0:
-        color_sensor.set_option(rs.option.enable_auto_exposure, 0)
-        color_sensor.set_option(rs.option.exposure, args.exposure)
-    header = (json.dumps({"width": intr.width, "height": intr.height, "fps": args.fps,
-                          "K": [[intr.fx, 0, intr.ppx], [0, intr.fy, intr.ppy], [0, 0, 1]],
-                          "dist": list(intr.coeffs), "serial": dev.get_info(rs.camera_info.serial_number)})
-              + "\n").encode()
+        subprocess.run(["killall", "VDCAssistant", "cameracaptured"], capture_output=True)
+        time.sleep(1.5)
+        try:
+            devs = rs.context().query_devices()
+            if not len(devs):
+                raise SystemExit("no RealSense found: check the USB cable (USB 3 port)")
+            try:
+                devs[0].hardware_reset()
+                time.sleep(6.0)
+            except RuntimeError:
+                pass                             # the reset needs the camera too; the start may work now anyway
+            pipe, prof = start()
+        except RuntimeError as e2:
+            raise SystemExit(f"camera still not available ({str(e2).strip().splitlines()[-1]}).\n"
+                             "An app is using it: quit every app that may use a camera (Teams, Zoom, FaceTime, "
+                             "Photo Booth, browser tabs with video), unplug and replug the RealSense, start again.") from None
+
+    def make_header(prof, fps) -> bytes:
+        dev = prof.get_device()
+        intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        color_sensor = [s for s in dev.query_sensors() if s.get_info(rs.camera_info.name) == "RGB Camera"][0]
+        if args.exposure > 0:
+            color_sensor.set_option(rs.option.enable_auto_exposure, 0)
+            color_sensor.set_option(rs.option.exposure, args.exposure)
+        return (json.dumps({"width": intr.width, "height": intr.height, "fps": fps,
+                            "K": [[intr.fx, 0, intr.ppx], [0, intr.fy, intr.ppy], [0, 0, 1]],
+                            "dist": list(intr.coeffs), "serial": dev.get_info(rs.camera_info.serial_number)})
+                + "\n").encode()
+
+    mode = (args.width, args.height, args.fps)
+    header = [make_header(prof, args.fps)]       # a list: a mode change replaces it for new clients
 
     latest, clients = Latest(), []
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -142,12 +168,45 @@ def main():
             clients.append(conn)
             threading.Thread(target=serve_client, args=(conn, latest, header, clients), daemon=True).start()
 
+    def switch(new):
+        nonlocal pipe, prof, mode
+        try:
+            pipe.stop()
+        except RuntimeError:
+            pass
+        try:
+            pipe, prof = start(*new)
+            mode = new
+        except RuntimeError as e:
+            print(f"cannot stream {new[0]}x{new[1]}@{new[2]} ({str(e).strip().splitlines()[-1]}); staying at "
+                  f"{mode[0]}x{mode[1]}@{mode[2]}", flush=True)
+            pipe, prof = start(*mode)
+        header[0] = make_header(prof, mode[2])
+        with latest.cond:
+            latest.item = None                   # no old-size frame for the next client
+        for c in list(clients):                  # they reconnect and read the new header
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        print(f"serving {mode[0]}x{mode[1]}@{mode[2]}", flush=True)
+
     threading.Thread(target=acceptor, daemon=True).start()
-    print(f"serving {intr.width}x{intr.height}@{args.fps} on 127.0.0.1:{args.port} (pid {os.getpid()})", flush=True)
+    print(f"serving {mode[0]}x{mode[1]}@{mode[2]} on 127.0.0.1:{args.port} (pid {os.getpid()})", flush=True)
     last_client = time.monotonic()
     try:
         while not latest.stop:
-            frames = pipe.wait_for_frames(5000)
+            if latest.mode_req is not None:
+                req, latest.mode_req = latest.mode_req, None
+                if req != mode:
+                    switch(req)
+                    last_client = time.monotonic()
+            try:
+                frames = pipe.wait_for_frames(5000)
+            except RuntimeError as e:
+                print(f"camera lost ({str(e).strip().splitlines()[0]}): check the USB cable, then run "
+                      "start_camera.sh again", flush=True)
+                break
             c = frames.get_color_frame()
             if not c:
                 continue
@@ -162,7 +221,10 @@ def main():
                 break
     finally:
         latest.stop = True
-        pipe.stop()
+        try:
+            pipe.stop()
+        except RuntimeError:                     # already stopped by the disconnect
+            pass
         srv.close()
         print("stopped", flush=True)
 

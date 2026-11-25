@@ -12,6 +12,7 @@ import json
 import socket
 import struct
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,6 +30,7 @@ class Frame:
 
 class RealSenseClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 8770, timeout: float = 3.0):
+        self.host, self.port = host, port
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._buf = b""
@@ -87,6 +89,13 @@ class RealSenseClient:
                 raise TimeoutError("no frame from the camera server")
             return self._latest
 
+    def request_mode(self, width: int, height: int, fps: int) -> None:
+        """Ask the server to restream at this size; it then drops every client (this one too)."""
+        try:
+            self.sock.sendall(f"mode {int(width)} {int(height)} {int(fps)}\n".encode())
+        except OSError:
+            pass
+
     def stop_server(self) -> None:
         try:
             self.sock.sendall(b"quit\n")
@@ -99,3 +108,26 @@ class RealSenseClient:
             self.sock.close()
         except OSError:
             pass
+
+
+def switch_mode(cam, width: int, height: int, fps: int, timeout: float = 12.0):
+    """A client of the server streaming at this size: `cam` itself if it already is (or cannot switch,
+    e.g. a simulated camera); else the server restreams (no password) and a new client is returned.
+    TimeoutError if the server does not switch (one started before the switch existed)."""
+    want = (int(width), int(height), int(fps))
+    if not hasattr(cam, "request_mode") or (cam.width, cam.height, getattr(cam, "fps", fps)) == want:
+        return cam
+    host, port = cam.host, cam.port
+    cam.request_mode(*want)
+    cam.close()
+    t_end = time.monotonic() + timeout
+    while time.monotonic() < t_end:
+        time.sleep(0.5)
+        try:
+            c = RealSenseClient(host, port, timeout=2.0)
+        except (OSError, ConnectionError, ValueError):
+            continue
+        if (c.width, c.height, c.fps) == want:
+            return c
+        c.close()
+    raise TimeoutError(f"the camera server did not switch to {want[0]}x{want[1]}@{want[2]}: ./rig camera stop, then try again")
