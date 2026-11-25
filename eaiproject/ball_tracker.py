@@ -137,10 +137,10 @@ class BallTracker:
 
     def expected_radius_px(self, xy) -> float:
         """Apparent ball radius (pixels) at table position xy, from the calibration."""
-        c = self.world_to_pixel(xy)[0]
-        # project a point one radius away perpendicular to the viewing ray ~ sideways in x
-        e = self.world_to_pixel(np.asarray(xy) + [self.r, 0.0])[0]
-        return float(np.linalg.norm(e - c))
+        # f * r / distance, for any camera direction. (An offset of r along world x was used before:
+        # right for a camera looking across the table, far too small for one looking along it.)
+        p_cam = self.calib.R @ np.array([xy[0], xy[1], self.r]) + self.calib.tvec.reshape(3)
+        return float(self.calib.K[0, 0] * self.r / np.linalg.norm(p_cam))
 
     # -- detection
     def detect(self, img: np.ndarray, roi_center_uv=None) -> Detection | None:
