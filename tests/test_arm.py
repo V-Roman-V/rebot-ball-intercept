@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -85,8 +86,22 @@ class FakeBus:
         return i == len(poses)
 
 
+class SimTime:
+    """Stands in for the `time` module inside eaiproject/arm.py: sleeping advances a simulated clock."""
+
+    def __init__(self):
+        self.t = 1000.0
+        self.strftime = time.strftime
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, dt: float) -> None:
+        self.t += max(float(dt), 0.0)
+
+
 def no_sleep():
-    return mock.patch.object(arm.time, "sleep", lambda s: None)
+    return mock.patch.object(arm, "time", SimTime())
 
 
 class ConfigTest(unittest.TestCase):

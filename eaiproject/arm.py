@@ -259,16 +259,20 @@ class Arm:
         self.command(q)
         return q
 
-    def go(self, q, speed: float = MOVE_SPEED, settle: float = 0.3) -> np.ndarray:
-        """Straight joint-space move from where the arm is to `q`: eased, the fastest joint peaking at
-        `speed`, streamed at RATE. Returns the pose reached after `settle` seconds."""
-        q0, q1 = self.read(), np.asarray(q, float)
-        n = max(int(np.ceil(np.abs(q1 - q0).max() * 1.5 / speed * RATE)), 1)   # smoothstep peaks at 1.5x the mean
+    def follow(self, path) -> None:
+        """Stream the joint targets of `path` (model angles), one every 1 / RATE s."""
         t = time.monotonic()
-        for s in ease(n):
-            self.command(q0 + s * (q1 - q0))
+        for q in path:
+            self.command(q)
             t += 1.0 / RATE
             time.sleep(max(0.0, t - time.monotonic()))
+
+    def go(self, q, speed: float | None = None, settle: float = 0.3) -> np.ndarray:
+        """Straight joint-space move from where the arm is to `q`: eased, the fastest joint peaking at
+        `speed` (default MOVE_SPEED), streamed at RATE. Returns the pose reached after `settle` seconds."""
+        q0, q1 = self.read(), np.asarray(q, float)
+        n = max(int(np.ceil(np.abs(q1 - q0).max() * 1.5 / (speed or MOVE_SPEED) * RATE)), 1)   # smoothstep: 1.5x the mean
+        self.follow(q0 + ease(n)[:, None] * (q1 - q0))
         time.sleep(settle)
         return self.read()
 
@@ -288,12 +292,12 @@ class Arm:
 
 
 @contextmanager
-def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=input):
+def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
     Without recorded poses it starts and ends where the arm was resting. Ctrl+C (or an error) holds
     the arm where it is and releases it after ENTER; a second Ctrl+C releases at once. A Ctrl+C that
     comes before the work starts is raised again (the work never runs)."""
-    cfg = cfg or load()
+    cfg, ask = cfg or load(), ask or input
     arm = Arm(cfg, rs, speed)
     working = False
     try:
