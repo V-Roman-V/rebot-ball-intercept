@@ -20,6 +20,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eaiproject import rig_calib as rc  # noqa: E402
+from eaiproject.ball_tracker import CameraCalib  # noqa: E402
+from eaiproject.real_intercept import make_tracker, on_table  # noqa: E402
 
 BIAS = np.array([0.003, -0.002, 0.009])          # constant FK model bias (m)
 K_HD = np.array([[910.0, 0, 640.0], [0, 910.0, 360.0], [0, 0, 1]])
@@ -114,8 +116,9 @@ class Rig:
         return np.concatenate([np.linalg.norm(rig_map.markers[k] - self.truth[k][:4], axis=1)
                                for k in (keys or self.keys)]) * 1000
 
-    def ball_errors_mm(self, rig_map: rc.RigMap, points_xy) -> np.ndarray:
-        """Relocalise from a NEW camera pose at the tracking resolution, then locate balls."""
+    def ball_errors_mm(self, rig_map: rc.RigMap, points_xy, tracker: bool = False) -> np.ndarray:
+        """Relocalise from a NEW camera pose at the tracking resolution, then locate balls (with
+        `tracker`: through make_tracker() + BallTracker, as the live scripts do)."""
         rv, tv = self.camera()
         det = self.detect(rv, tv, K_VGA, (640, 480), 0.2)
         res = rc.relocalize(rig_map, K_VGA, DIST, det)
@@ -123,7 +126,12 @@ class Rig:
         for x, y in points_xy:
             centre = rc.from_plane(self.plane, rc.to_plane(self.plane, [[x, y, 0]])[0], rc.BALL_R)[0]   # true ball centre
             uv = rc.project(K_VGA, DIST, rv, tv, centre)
-            xy = rc.pixel_to_ball_xy(K_VGA, DIST, res.rvec, res.tvec, rig_map.plane, uv)[0]
+            if tracker:
+                trk = make_tracker(CameraCalib(K_VGA, DIST, res.rvec, res.tvec, 640, 480), rig_map.plane,
+                                   hsv=((0, 0, 0), (1, 1, 1)))
+                xy = trk.pixel_to_world(uv[0])
+            else:
+                xy = rc.pixel_to_ball_xy(K_VGA, DIST, res.rvec, res.tvec, rig_map.plane, uv)[0]
             errs.append(np.linalg.norm(xy - centre[:2]) * 1000)
         return np.array(errs)
 
@@ -201,6 +209,14 @@ class SolverTest(unittest.TestCase):
             self.assertLess(e.max(), 3.0, f"seed {seed}: ball-plane error {e.max():.2f} mm")
         print(f"\n  max ball-plane error over 5 seeds (new camera pose, 640x480): {worst:.2f} mm")
 
+    def test_ball_through_the_real_tracker_path(self):
+        """The end-to-end sign convention (table + r on the camera's side) on the tilted table plane."""
+        for seed in range(5):
+            rig = Rig(seed)
+            m = rc.solve_rig(rig.observations(rig.near)).rig_map
+            e = rig.ball_errors_mm(m, LANE, tracker=True)
+            self.assertLess(e.max(), 3.0, f"tracker-path error {e.max():.2f} mm")
+
     def test_two_touched_markers(self):
         for seed in range(5):
             rig = Rig(seed)
@@ -272,6 +288,8 @@ class WarningsAndFailuresTest(unittest.TestCase):
         res = rc.relocalize(m, K_VGA, DIST, rig.detect(rv, tv, K_VGA, (640, 480), 0.2))
         with self.assertRaisesRegex(rc.CalibrationError, "radius must be positive"):
             rc.pixel_to_ball_xy(K_VGA, DIST, res.rvec, res.tvec, m.plane, [[320, 240]], r=-rc.BALL_R)
+        with self.assertRaisesRegex(rc.CalibrationError, "not above"):          # the tracker refuses a camera under the table
+            on_table(CameraCalib(K_VGA, DIST, res.rvec, res.tvec, 640, 480), [2.0, 0, 0])
         flipped = -np.asarray(m.plane)                         # a plane whose "up" is away from the camera
         with self.assertRaisesRegex(rc.CalibrationError, "from above"):
             rc.pixel_to_ball_xy(K_VGA, DIST, res.rvec, res.tvec, [flipped[0] + 2.0, 0, 0], [[320, 240]])

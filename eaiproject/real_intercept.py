@@ -1,20 +1,22 @@
-"""Real-rig glue: calibration loading, the ball tracker on RealSense frames, and the intercept planner.
+"""Real-rig glue: camera pose from the marker map, the ball tracker on RealSense frames, and the intercept planner.
 
 The planner is the sim's InterceptPolicy logic (straight-line crossing prediction at the intercept
 line, jaw facing the ball, rate limits on the jaw pose, IK in the MuJoCo model) driven by the tracker's
-estimate and wall-clock time instead of sim state. Heights are relative to the MEASURED table height
-along the intercept line (outputs/calibration/table_height.json, in the arm's own kinematic frame).
+estimate and wall-clock time instead of sim state. Heights are relative to the MEASURED table plane
+(config/rig_map.json, in the arm's own kinematic frame).
 It only computes targets; whether they are sent to the motors is the caller's business.
 """
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from . import rig_calib
 from .ball_intercept_env import BallInterceptEnv
 from .ball_tracker import BallTracker, CameraCalib
 
@@ -25,30 +27,45 @@ DEFAULT_HSV = ((5, 120, 120), (25, 255, 255))
 TABLE_XY = ((0.12, 1.00), (-0.36, 0.38))     # tracked region of the real table, robot frame (m)
 
 
-def load_calibration():
-    cal = json.loads((CAL_DIR / "camera_extrinsics.json").read_text())
-    calib = CameraCalib(np.array(cal["K"]), np.array(cal["dist"]), np.array(cal["rvec"]), np.array(cal["tvec"]),
-                        cal["width"], cal["height"])
-    th_path = CAL_DIR / "table_height.json"
-    if th_path.exists():
-        plane = np.array(json.loads(th_path.read_text())["plane_z=a+bx+cy"])
-    else:
-        plane = np.array([cal["table_z"], 0.0, 0.0])
-    return calib, plane, cal
-
-
 def table_z(plane, x, y) -> float:
     a, b, c = plane
     return float(a + b * x + c * y)
 
 
-def shifted(calib: CameraCalib, dz: float) -> CameraCalib:
-    """Same camera, world frame moved up by dz (so a table at z = dz becomes z' = 0 for the tracker)."""
-    t = calib.tvec + calib.R @ np.array([0.0, 0.0, dz])
-    return CameraCalib(calib.K, calib.dist, calib.rvec, t, calib.width, calib.height)
+def camera_calib(cam, res: rig_calib.Reloc) -> CameraCalib:
+    """Calibration of the live camera `cam` (K, dist, size) with the pose from rig_calib.locate()."""
+    return CameraCalib(cam.K, cam.dist, res.rvec, res.tvec, cam.width, cam.height)
+
+
+def locate_camera(cam, rig_map: rig_calib.RigMap, n_frames: int = 30, timeout: float = 6.0) -> rig_calib.Reloc:
+    """Camera pose in the arm frame from the table markers, on `n_frames` fresh frames of `cam`.
+    Raises rig_calib.CalibrationError with a message for the user when the markers do not allow it."""
+    images, fn, t_end = [], None, time.monotonic() + timeout
+    while len(images) < n_frames and time.monotonic() < t_end:
+        f = cam.read(timeout=2.0, newer_than=fn)
+        fn = f.frame_number
+        images.append(f.img)
+    res = rig_calib.locate(rig_map, cam.K, cam.dist, images)
+    CAL_DIR.mkdir(parents=True, exist_ok=True)
+    (CAL_DIR / "camera_pose.json").write_text(json.dumps(
+        rig_calib.pose_dict(res, rig_map, cam.K, cam.dist, cam.width, cam.height, getattr(cam, "serial", None)), indent=2))
+    return res
+
+
+def on_table(calib: CameraCalib, plane) -> CameraCalib:
+    """Same camera, with the world frame laid in the table plane: z' = 0 is the (tilted) table and
+    z' = r the plane of the ball centre, on the camera's side. In-plane coordinates equal base-frame
+    x, y to better than 0.05 mm for the tilts seen here, so the tracker's output is used as base x, y."""
+    o, e1, e2, n = rig_calib.plane_frame(plane)
+    if n @ (rig_calib.camera_centre(calib.rvec, calib.tvec) - o) <= BALL_R:
+        raise rig_calib.CalibrationError("the camera is not above the table plane")
+    R = calib.R @ np.column_stack([e1, e2, n])
+    return CameraCalib(calib.K, calib.dist, cv2.Rodrigues(R)[0].reshape(3), calib.R @ o + calib.tvec.reshape(3),
+                       calib.width, calib.height)
 
 
 def load_hsv():
+    """Ball colour range (HSV lo, hi) saved by ./rig calibrate (step 5), else a default for an orange ball."""
     p = CAL_DIR / "ball_hsv.json"
     if p.exists():
         d = json.loads(p.read_text())
@@ -56,19 +73,22 @@ def load_hsv():
     return DEFAULT_HSV
 
 
+def hsv_saved_time() -> str | None:
+    """When the ball colour was saved, or None if it never was."""
+    p = CAL_DIR / "ball_hsv.json"
+    return json.loads(p.read_text()).get("time") if p.exists() else None
+
+
 def save_hsv(lo, hi):
     CAL_DIR.mkdir(parents=True, exist_ok=True)
-    (CAL_DIR / "ball_hsv.json").write_text(json.dumps({"lo": list(map(int, lo)), "hi": list(map(int, hi))}))
+    (CAL_DIR / "ball_hsv.json").write_text(json.dumps({"lo": list(map(int, lo)), "hi": list(map(int, hi)),
+                                                       "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
 
 
-def make_tracker(calib, plane, hsv=None) -> tuple[BallTracker, float]:
-    """Tracker working in a frame where the table (mean height over the tracked area) is z' = 0."""
-    (x0, x1), (y0, y1) = TABLE_XY
-    zt = table_z(plane, 0.5 * (x0 + x1), 0.5 * (y0 + y1))
+def make_tracker(calib: CameraCalib, plane, hsv=None) -> BallTracker:
+    """Ball tracker for a camera with a known pose, projecting onto the measured table plane."""
     lo, hi = hsv or load_hsv()
-    trk = BallTracker(shifted(calib, zt), ball_r=BALL_R, hsv_lo=lo, hsv_hi=hi, table_xy=TABLE_XY,
-                      roi_half=50, bgr=True)
-    return trk, zt
+    return BallTracker(on_table(calib, plane), ball_r=BALL_R, hsv_lo=lo, hsv_hi=hi, table_xy=TABLE_XY, roi_half=50, bgr=True)
 
 
 class HostClock:
