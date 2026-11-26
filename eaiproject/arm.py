@@ -8,6 +8,9 @@ measured: with the jaw open and both fingertips resting on the table the jaw is 
 (`level_offset`). Joint 6 turns about the finger axis and the fingertip lies on that axis, so the
 correction moves no fingertip position: it only turns the jaw.
 
+The calibration tools read the unpowered arm through `ArmLink`, which connects whenever the arm
+answers on CAN: they start without it and say so on the pages that need it.
+
 Two poses, stored as MOTOR readings so they stay right when the offset is measured again:
     rest     the arm lies on itself without support: it is released there
     initial  where the arm goes before its work and comes back to after it
@@ -198,6 +201,77 @@ class ArmReader:
         self._stop = True
         self._thread.join(timeout=1.0)
         self.rs.close()
+
+
+class ArmLink:
+    """An ArmReader that connects by itself, so a tool can start without the arm: one try at once,
+    then a try every RETRY_S in the background until the arm answers on CAN. Until then it has no
+    readings and `status()` says why, for the page to show."""
+
+    RETRY_S = 2.0
+
+    def __init__(self, connect=None):
+        self._connect = connect or ArmReader
+        self.reader: ArmReader | None = None
+        self.error = ""
+        self._offset = None
+        self._stop = threading.Event()
+        if not self._try():
+            threading.Thread(target=self._retry, daemon=True).start()
+
+    def _try(self) -> bool:
+        try:
+            r = self._connect()
+        except ConnectionError:
+            self.error = "the arm does not answer (arm power on?)"
+            return False
+        except Exception:  # noqa: BLE001  (python-can raises several types)
+            self.error = "no CAN adapter (plugged in?)"
+            return False
+        if self._offset is not None:
+            r.offset = self._offset
+        if self._stop.is_set():
+            r.close()
+        else:
+            self.reader = r
+        return True
+
+    def _retry(self) -> None:
+        while not self._stop.wait(self.RETRY_S) and not self._try():
+            pass
+
+    def status(self) -> str:
+        """'' when connected; else what to tell the user."""
+        return "" if self.reader is not None else f"ARM NOT CONNECTED: {self.error}. It connects by itself"
+
+    @property
+    def offset(self) -> np.ndarray:
+        if self.reader is not None:
+            return self.reader.offset
+        return self._offset if self._offset is not None else load().offset
+
+    @offset.setter
+    def offset(self, value) -> None:
+        self._offset = np.asarray(value, float)
+        if self.reader is not None:
+            self.reader.offset = self._offset
+
+    def latest(self, max_age: float = 0.3) -> ArmSample | None:
+        r = self.reader
+        return None if r is None else r.latest(max_age)
+
+    def between(self, t0: float, t1: float) -> list[ArmSample]:
+        r = self.reader
+        return [] if r is None else r.between(t0, t1)
+
+    def steady(self, window: float = 0.25) -> tuple[ArmSample, float] | None:
+        r = self.reader
+        return None if r is None else r.steady(window)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self.reader is not None:
+            self.reader.close()
 
 
 # --------------------------------------------------------------------------------- powered

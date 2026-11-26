@@ -182,12 +182,25 @@ class CalibrateTest(SimRigCase):
         self.assertTrue((self.out_dir / "ball_hsv.json").exists())
         self.assertIn("arm: wrist zero +1", out)                                # the summary at the end
 
-    def test_no_arm_on_can(self):
-        steps = [(None, None), ("2", None)]
+    def test_starts_without_the_arm_and_picks_it_up(self):
+        tries = iter([ConnectionError("no answer")] * 2)
+
+        def connect(*a, **k):                              # the arm answers from the third try on
+            e = next(tries, None)
+            if e is not None:
+                raise e
+            return self.arm
+
+        steps = [(None, None), ("4", None), (None, None), (None, None),     # step 4 without the arm: it stays open
+                 (None, lambda: time.sleep(0.3)),                           # the arm is powered: it connects by itself
+                 ("n", lambda: setattr(self.arm, "q", REST.copy())), (" ", None), ("q", None)]
         code, out = self.run_script("calibrate", ["--session", "x"], steps,
-                                    patches=[mock.patch.object(arm, "ArmReader", side_effect=ConnectionError("no answer"))])
-        self.assertEqual(code, 2, out)
-        self.assertIn("need the arm on CAN", out)
+                                    patches=[mock.patch.object(arm, "ArmReader", connect),
+                                             mock.patch.object(arm.ArmLink, "RETRY_S", 0.05)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ARM NOT CONNECTED: the arm does not answer", out)
+        self.assertIn("rest pose saved", out)
+        np.testing.assert_allclose(arm.load().rest, REST, atol=2e-3)
 
 
 class SessionChoiceTest(unittest.TestCase):

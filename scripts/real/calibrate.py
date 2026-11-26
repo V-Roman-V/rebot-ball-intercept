@@ -1,4 +1,5 @@
-"""Calibration of the rig, in one guided window. Read-only on CAN: nothing is ever powered.
+"""Calibration of the rig, in one guided window. Read-only on CAN: nothing is ever powered. Starts
+without the arm too: steps 2-4 say ARM NOT CONNECTED until it answers, then work by themselves.
 
     ./rig calibrate                     # continue the latest session (daily: opens at step 4)
     ./rig calibrate --new               # new table map: the table or a marker moved
@@ -59,7 +60,6 @@ HD, VGA = (1280, 720, 30), (640, 480, 60)       # camera: the map steps / the ba
 WIN = "rig calibration"
 NAV = "ENTER next step   BACKSPACE previous   1-5 jump (4 arm, 5 ball)   q quit (everything is saved)"
 STEPS = ("views", "touch", "sweep", "solve", "arm", "ball")
-ARM_STEPS = ("touch", "sweep", "arm")
 
 
 def open_camera():
@@ -81,12 +81,9 @@ def to_mode(cam, mode):
         return RealSenseClient()
 
 
-def open_arm():
-    try:
-        return arm_mod.ArmReader()
-    except Exception as e:  # noqa: BLE001  (python-can raises several types)
-        print(f"Arm not available on CAN: {e}")
-        return None
+def no_readings(arm) -> str:
+    """Why there is no joint reading: the arm is not connected, or it stopped answering."""
+    return arm.status() or "no joint readings (arm power?)"
 
 
 def nav(key: int) -> str | None:
@@ -263,7 +260,7 @@ def run_touch(cam, arm, sess: Path) -> str:
             put(img, f"fingertip x {s.p[0] * 100:6.1f}  y {s.p[1] * 100:+6.1f} cm  z {s.p[2] * 1000:6.1f} mm",
                 (10, img.shape[0] - 58))
         else:
-            put(img, "no joint readings", (10, img.shape[0] - 58), RED)
+            put(img, no_readings(arm), (10, img.shape[0] - 58), RED)
         footer(img, msg)
         cv2.imshow(WIN, img)
         key = cv2.waitKey(1) & 0xFF
@@ -287,7 +284,7 @@ def run_touch(cam, arm, sess: Path) -> str:
             if corner is None:
                 msg = "all 4 corners of this marker are done: n = next marker, ENTER = next step"
             elif st is None:
-                msg = "no joint readings"
+                msg = no_readings(arm)
             elif st[1] * 1000 > STILL_MM:
                 msg = f"the fingertip moved {st[1] * 1000:.1f} mm: hold still and press again"
             else:
@@ -366,7 +363,7 @@ def run_sweep(cam, arm, sess: Path) -> str:
             put(img, f"fingertip x {s.p[0] * 100:5.1f} y {s.p[1] * 100:+5.1f} cm  z {s.p[2] * 1000:5.1f} mm   "
                      "(any gripper angle: keep the closed fingertips on the table)", (10, 50), GREEN, 0.5)
         else:
-            put(img, "no joint readings", (10, 50), RED)
+            put(img, no_readings(arm), (10, 50), RED)
         put(img, ("3 SWEEP: RECORDING" if holding else "3 SWEEP: hold SPACE and slide the closed fingertips over the table"),
             (10, 24), RED if holding else YELLOW, 0.65, 2 if holding else 1)
         put(img, f"{len(allp)} samples   {len(cells)} cells   box around the intercept line: {100 * cover:.0f} % covered "
@@ -475,7 +472,7 @@ def run_arm(cam, arm, sess: Path) -> str:
             put(img, f"if both fingertips touch now: wrist zero {math.degrees(corr):+.1f} deg" if ok else
                 "fingers (almost) straight down: tilt them forward", (10, 166), GREEN if ok else RED, 0.5)
         elif s is None:
-            put(img, "no joint readings", (10, 166), RED)
+            put(img, no_readings(arm), (10, 166), RED)
         put(img, "SPACE record   n / p next / previous part   u undo this part", (10, 192), GREY, 0.45)
         footer(img, msg)
         cv2.imshow(WIN, img)
@@ -503,7 +500,7 @@ def run_arm(cam, arm, sess: Path) -> str:
             r = motor_reading(arm)
             last_fn = None
             if r is None:
-                msg = "no joint readings"
+                msg = no_readings(arm)
                 continue
             q, moved = r
             if part == "level" and moved > STILL_DEG:
@@ -724,17 +721,14 @@ def main() -> int:
     if cam is None:
         return 2
     print(f"session: {sess}")
-    step, arm, code = start_step(sess, args), None, 0
+    arm = arm_mod.ArmLink()                         # connects whenever the arm answers on CAN
+    if arm.status():
+        print(f"{arm.status()} (steps 2-4 need it; the others work without it)", flush=True)
+    step, code = start_step(sess, args), 0
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, 1280, 720)
     try:
         while step != "quit":
-            if step in ARM_STEPS and arm is None:
-                arm = open_arm()
-                if arm is None:
-                    print("Steps 2-4 need the arm on CAN (powered, not enabled). Everything so far is saved.")
-                    code = 2
-                    break
             mode = HD if step in ("views", "touch", "sweep") else VGA if step == "ball" else None
             if mode is not None:
                 cam = to_mode(cam, mode)
@@ -763,8 +757,7 @@ def main() -> int:
     finally:
         cv2.destroyAllWindows()
         cam.close()
-        if arm is not None:
-            arm.close()
+        arm.close()
     print(daily_summary())
     return code
 

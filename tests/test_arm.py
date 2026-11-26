@@ -143,6 +143,35 @@ class LevelTest(unittest.TestCase):
         self.assertLess(sens, 0.1)
 
 
+class ArmLinkTest(unittest.TestCase):
+    def test_connects_when_the_arm_answers(self):
+        reader = mock.Mock(offset=np.zeros(6))
+        reader.latest.return_value = "sample"
+        tries = iter([OSError("adapter unplugged"), ConnectionError("arm silent")])
+
+        def connect():
+            e = next(tries, None)
+            if e is not None:
+                raise e
+            return reader
+
+        with mock.patch.object(arm.ArmLink, "RETRY_S", 0.02):
+            link = arm.ArmLink(connect)
+            self.assertIn("no CAN adapter", link.status())                      # first try, at once
+            self.assertIsNone(link.latest())
+            self.assertIsNone(link.steady())
+            self.assertEqual(link.between(0.0, 1.0), [])
+            link.offset = np.full(6, 0.1)                                       # set before it connects: handed over
+            t_end = time.monotonic() + 2.0
+            while link.status() and time.monotonic() < t_end:
+                time.sleep(0.01)
+        self.assertEqual(link.status(), "")
+        self.assertEqual(link.latest(), "sample")
+        np.testing.assert_allclose(reader.offset, 0.1)
+        link.close()
+        reader.close.assert_called_once()
+
+
 class ArmTest(unittest.TestCase):
     def test_enable_holds_where_the_arm_is(self):
         bus = FakeBus(REST)

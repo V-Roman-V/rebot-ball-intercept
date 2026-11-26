@@ -1,4 +1,5 @@
-"""Live check of the calibration (read-only on CAN; works without the arm too).
+"""Live check of the calibration (read-only on CAN; works without the arm too, and picks it up when
+it answers).
 
 The camera pose is found at start from the table markers and config/rig_map.json (keep hands and
 arm off the markers for the first second; c does it again after the camera was moved).
@@ -45,14 +46,6 @@ FIELDS = ["time", "camera", "kind", "point", "expected_x", "expected_y", "measur
 WORST = {"OK": 0, "WARN": 1, "FAIL": 2}
 
 
-def open_arm():
-    try:
-        return arm_mod.ArmReader()
-    except Exception as e:  # noqa: BLE001
-        print(f"Arm not available on CAN ({e}): fingertip check disabled")
-        return None
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", default="cam", help="camera-position name written to validation.csv")
@@ -84,7 +77,7 @@ def main() -> int:
         print(f"CANNOT LOCATE THE CAMERA: {e}")
         cam.close()
         return 1
-    arm = open_arm()
+    arm = arm_mod.ArmLink()                         # the fingertip check works once the arm answers on CAN
     proj = lambda P: rc.project(calib.K, calib.dist, calib.rvec, calib.tvec, np.asarray(P, float).reshape(-1, 3))
 
     pts_path = rc.OUT_DIR / "check_points.json"
@@ -114,7 +107,7 @@ def main() -> int:
         st_markers = rc.status(med_px, med_mm) if len(px) >= 2 else "WARN"
 
         # fingertip
-        s = arm.latest() if arm is not None else None
+        s = arm.latest()
         current = None                                      # what SPACE would record
         if s is not None:
             tip = s.p
@@ -133,8 +126,8 @@ def main() -> int:
             else:
                 put(img, f"fingertip x {tip[0] * 100:5.1f} y {tip[1] * 100:+5.1f} cm z {tip[2] * 1000:5.1f} mm "
                          f"({(tip[2] - table_z(plane, tip[0], tip[1])) * 1000:+.0f} mm above the table)", (10, 70), WHITE, 0.45)
-        elif arm is not None:
-            put(img, "no joint readings", (10, 70), RED)
+        else:
+            put(img, arm.status() or "no joint readings (arm power?)", (10, 70), GREY if arm.status() else RED, 0.45)
 
         # ball
         if ball_mode:
@@ -191,7 +184,7 @@ def main() -> int:
             ball_mode, msg = not ball_mode, ""
         if key == ord("t"):
             if s is None:
-                msg = "no joint readings: cannot add a point"
+                msg = f"{arm.status() or 'no joint readings'}: cannot add a point"
             else:
                 name = f"point {len(extra) + 1}"
                 extra[name] = [float(tip[0]), float(tip[1])]
@@ -216,8 +209,7 @@ def main() -> int:
             msg = f"saved {p.name}"
     cv2.destroyAllWindows()
     cam.close()
-    if arm is not None:
-        arm.close()
+    arm.close()
     if rows:
         path = rc.OUT_DIR / "validation.csv"
         new = not path.exists()

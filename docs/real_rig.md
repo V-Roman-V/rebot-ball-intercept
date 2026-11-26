@@ -105,7 +105,9 @@ pose from the markers when it starts.
 
 ENTER goes to the next step, BACKSPACE back, `1`-`5` jump, `q` quits. Everything is saved as it is
 recorded, so you can quit at any time and continue later. Nothing is powered: the CAN bus is opened
-read-only. Support the unpowered arm while moving it: joints 2 and 3 drop.
+read-only. Support the unpowered arm while moving it: joints 2 and 3 drop. It also starts without
+the arm (off, or no CAN adapter): steps 2-4 then show `ARM NOT CONNECTED` and pick the arm up by
+themselves once it answers, without a restart. `./rig check` does the same.
 
 ### Table map (steps 1-3, once)
 
