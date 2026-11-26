@@ -10,7 +10,8 @@
         cli.run(main)                 # a Ctrl+C before the loop (setup): "stopped (Ctrl+C)"
 
 A second Ctrl+C stops at once. The powered scripts get theirs from eaiproject.arm.powered():
-there Ctrl+C holds the arm.
+there the first Ctrl+C holds the arm and a second one drops it and stops. Ctrl+C alone always
+stops a program.
 """
 from __future__ import annotations
 
@@ -42,7 +43,7 @@ def ctrl_c() -> bool:
 def run(main, *args) -> None:
     """sys.exit(main(*args)); a Ctrl+C (or Ctrl+D at a prompt) that reaches here ends it quietly.
     The scripts' first lines make a Ctrl+C during their imports exit quietly; from here on it is the
-    normal KeyboardInterrupt again (eaiproject.arm.powered() holds the arm on it)."""
+    normal KeyboardInterrupt again (eaiproject.arm.powered() holds the arm on the first one)."""
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         code = main(*args)

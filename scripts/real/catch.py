@@ -8,7 +8,8 @@ ENTER powers the arm: rest -> initial pose -> the waiting pose at the intercept 
 follows the planner (the simulation's policy on the tracked ball). Roll the ball.
 
 Keys (window): q finish (initial pose -> rest -> release), r reset the tracker.
-Ctrl+C in the terminal holds the arm where it is; ENTER then releases it (support the arm first).
+Ctrl+C in the terminal holds the arm where it is; ENTER then releases it (support the arm first),
+a second Ctrl+C drops it at once and stops.
 The motors' own speed limit and current cap are the safety.
 Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
 """
@@ -110,7 +111,7 @@ def main() -> int:
                 cv2.line(img, ipt(jl), ipt(jr), YELLOW, 3)
                 put(img, f"POWERED  {p.phase}" + (f"  crossing y {p.crossing_y * 100:+.1f} cm in {p.t_cross * 1000:.0f} ms"
                                                   if p.crossing_y is not None else ""), (8, 18), YELLOW)
-                put(img, "q finish   r reset   Ctrl+C (terminal) holds", (8, img.shape[0] - 10), GREY, 0.45)
+                put(img, "q finish   r reset   Ctrl+C (terminal) holds, twice drops", (8, img.shape[0] - 10), GREY, 0.45)
                 cv2.imshow(WIN, img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q") or window_closed(WIN):

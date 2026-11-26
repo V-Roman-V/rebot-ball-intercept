@@ -9,7 +9,7 @@ ruler. Route: rest -> initial pose -> the passes, highest first, alternating dir
 initial pose -> rest, then the motors are released.
 
 The motors' own speed limit and current cap are the safety. ENTER powers the arm; Ctrl+C holds it
-where it is, and ENTER then releases it (support the arm first).
+where it is, then ENTER releases it (support the arm first); a second Ctrl+C drops it at once and stops.
 """
 from __future__ import annotations
 

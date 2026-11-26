@@ -277,26 +277,19 @@ class ArmLink:
 
 # --------------------------------------------------------------------------------- powered
 @contextmanager
-def _ctrl_c(note: str | None = None):
-    """Ctrl+C cannot cut the block short. With a `note` it is ignored (the note is printed, e.g. while
-    the arm is held); without, it is raised right after the block (CAN sequences that must not stop
-    halfway: enabling, releasing)."""
+def _ctrl_c_after():
+    """Ctrl+C cannot cut the block short: it is raised right after it (CAN sequences that must not
+    stop halfway: enabling, holding, releasing)."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
     hit = []
-
-    def handler(*_):
-        hit.append(1)
-        if note:
-            print(note, flush=True)
-
-    old = signal.signal(signal.SIGINT, handler)
+    old = signal.signal(signal.SIGINT, lambda *_: hit.append(1))
     try:
         yield
     finally:
         signal.signal(signal.SIGINT, old)
-    if hit and note is None:
+    if hit:
         raise KeyboardInterrupt
 
 
@@ -333,7 +326,7 @@ class Arm:
     def enable(self) -> np.ndarray:
         """Position mode, speed limit, current cap and target = where each joint is now, then power
         on. Returns the (model) pose it holds. Runs whole: a Ctrl+C meanwhile comes right after."""
-        with _ctrl_c():
+        with _ctrl_c_after():
             q = self.read()
             for m, qm in zip(ARM_IDS, self.cfg.to_motor(q)):
                 self.rs.stop(m)
@@ -379,7 +372,7 @@ class Arm:
 
     def release(self) -> None:
         """Stop every joint (three rounds). Runs whole: a Ctrl+C meanwhile comes right after."""
-        with _ctrl_c():
+        with _ctrl_c_after():
             for _ in range(3):
                 for m in ARM_IDS:
                     self.rs.stop(m)
@@ -397,15 +390,17 @@ class Arm:
 @contextmanager
 def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
-    Without recorded poses it starts and ends where the arm was resting. Ctrl+C (or an error) holds
-    the arm where it is and releases it after ENTER; more Ctrl+C presses meanwhile keep it held (an
-    extra press never drops it). A Ctrl+C during the work ends the work: the caller goes on after its
-    `with` (saves its log). One before the work started is raised again (the work never runs)."""
+    Without recorded poses it starts and ends where the arm was resting.
+
+    Ctrl+C (or an error) holds the arm where it is. Then ENTER releases it, and the caller goes on
+    after its `with` (saves its log); or a second Ctrl+C releases it at once and stops the program
+    (KeyboardInterrupt). Ctrl+C alone always stops a powered task. A Ctrl+C before the work started
+    is raised again (the work never runs)."""
     cfg, ask = cfg or load(), ask or input
     arm = Arm(cfg, rs, speed)
     working = False
     try:
-        ask("Arm clear? ENTER powers it (Ctrl+C holds it at any time)... ")
+        ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")
         start = arm.enable()
         rest = start if cfg.rest is None else cfg.rest_model()
         if cfg.initial is not None:
@@ -416,18 +411,22 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
             arm.go(cfg.initial_model())
         arm.go(rest)
     except (Exception, KeyboardInterrupt) as e:
+        forced = False
         if arm.enabled:
             why = "Ctrl+C" if isinstance(e, KeyboardInterrupt) else f"{type(e).__name__}: {e}"
-            with _ctrl_c(note="\n(the arm is held: support it, then ENTER releases it)"):
-                try:
-                    arm.hold()
-                except Exception:  # noqa: BLE001  (lost the bus: nothing to hold with)
-                    pass
-                try:
-                    ask(f"\n{why} -> holding. Support the arm, then ENTER releases it... ")
-                except EOFError:                         # stdin closed: release
-                    pass
-                arm.release()
+            try:
+                with _ctrl_c_after():                    # a second Ctrl+C right away still lets the hold finish
+                    try:
+                        arm.hold()
+                    except Exception:  # noqa: BLE001  (lost the bus: nothing to hold with)
+                        pass
+                ask(f"\n{why} -> holding. Support the arm, then ENTER releases it (Ctrl+C: drop it now)... ")
+            except (KeyboardInterrupt, EOFError):        # the second Ctrl+C (or stdin closed): release now, stop
+                forced = True
+                print("\nreleased", flush=True)
+            arm.release()
+        if forced and isinstance(e, KeyboardInterrupt):
+            raise KeyboardInterrupt from None
         if not (working and isinstance(e, KeyboardInterrupt)):
             raise
     finally:

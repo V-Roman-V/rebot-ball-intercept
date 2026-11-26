@@ -262,23 +262,45 @@ class PoweredTest(unittest.TestCase):
         self.assertIn("ValueError: planner failed", asks[-1])
         self.assertEqual(bus.on, set())
 
-    def test_more_ctrl_c_while_held_keep_it_held(self):
-        """Real SIGINTs at the hold prompt (Ctrl+C pressed again) are absorbed: only ENTER releases."""
-        bus, asks, before = FakeBus(REST), [], signal.getsignal(signal.SIGINT)
+    def test_second_ctrl_c_drops_the_arm_and_stops(self):
+        """Ctrl+C holds; a second one at the hold prompt releases at once and stops the program."""
+        bus, held_at_ask = FakeBus(REST), []
 
         def ask(s):
-            asks.append(s)
             if "holding" in s:
-                for _ in range(2):
-                    os.kill(os.getpid(), signal.SIGINT)
-                    self.assertEqual(len(bus.on), 6)                            # still held
+                held_at_ask.append(len(bus.on))
+                raise KeyboardInterrupt                                         # Ctrl+C again
 
-        out = io.StringIO()
-        with no_sleep(), redirect_stdout(out), arm.powered(self.CFG, bus, ask=ask) as a:
-            a.go(WORK)
-            raise KeyboardInterrupt
-        self.assertEqual(out.getvalue().count("the arm is held"), 2)
-        self.assertEqual(bus.on, set())                                         # released after ENTER
+        with no_sleep(), redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            with arm.powered(self.CFG, bus, ask=ask) as a:
+                a.go(WORK)
+                raise KeyboardInterrupt
+        self.assertEqual(held_at_ask, [6])                                      # held until the second press
+        np.testing.assert_allclose(bus.targets[-1], WORK - ROLL15)              # dropped there, not taken home
+        self.assertEqual(bus.on, set())
+        self.assertTrue(bus.closed)
+
+    def test_two_quick_ctrl_c_finish_the_hold_then_drop(self):
+        """The second press lands while the hold is being sent (a real SIGINT): the hold completes,
+        then the arm is released at once, without the prompt."""
+        bus, asks, armed = FakeBus(REST), [], []
+        read, before = bus.read_param_f32, signal.getsignal(signal.SIGINT)
+
+        def read_with_ctrl_c(m, idx, timeout=0.05):
+            if armed:
+                armed.clear()
+                os.kill(os.getpid(), signal.SIGINT)
+            return read(m, idx, timeout)
+
+        bus.read_param_f32 = read_with_ctrl_c
+        with no_sleep(), redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            with arm.powered(self.CFG, bus, ask=asks.append) as a:
+                a.go(WORK)
+                armed.append(1)
+                raise KeyboardInterrupt
+        self.assertFalse(any("holding" in s for s in asks))
+        np.testing.assert_allclose(bus.targets[-1], WORK - ROLL15)              # the hold was sent whole
+        self.assertEqual(bus.on, set())
         self.assertIs(signal.getsignal(signal.SIGINT), before)
 
     def test_ctrl_c_while_enabling_finishes_it_then_holds(self):

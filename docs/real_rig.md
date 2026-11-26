@@ -82,7 +82,8 @@ Options after the task go to its script: `./rig calibrate --solve`, `./rig move 
 
 **Ctrl+C** in the terminal stops any task like `q` or closing its window: what the window saves on
 `q` is saved, and nothing is printed but `stopped (Ctrl+C)` when it comes during the start-up. A
-second Ctrl+C stops at once. The powered tasks are the exception: there Ctrl+C holds the arm (below).
+second Ctrl+C stops at once. In the powered tasks the first Ctrl+C holds the arm and a second one
+drops it and stops (below). Ctrl+C alone always stops a task.
 
 ## Calibration
 
@@ -222,9 +223,9 @@ recorded poses they start and end where the arm was resting.
 
 - **ENTER** powers the arm. Before it, the arm should be at rest and the workspace clear.
 - **Ctrl+C** (in the terminal) holds the arm where it is. **Support the arm**, then ENTER releases
-  it: joints 2 and 3 drop when released. More Ctrl+C presses keep it held (an extra press never
-  drops it); only ENTER, or the power switch, releases it. Ctrl+C at the first prompt powers
-  nothing. Enabling and releasing are never cut halfway by a Ctrl+C. An error holds and asks the
+  it: joints 2 and 3 drop when released. A **second Ctrl+C** releases it at once (the arm drops)
+  and stops the task. Ctrl+C at the first prompt powers nothing. Enabling, holding and releasing
+  are never cut halfway by a Ctrl+C: it takes effect right after. An error holds and asks the
   same way.
 - The protection is the motors' own: a firmware speed limit (0.8 rad/s; `catch --joint-speed`,
   default 1.5) and a current cap per joint (6 / 18 / 14 / 5 / 4 / 4 A), written to RAM before
