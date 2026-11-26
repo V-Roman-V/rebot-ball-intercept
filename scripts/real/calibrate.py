@@ -48,7 +48,8 @@ from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, WHITE, YELLOW, TopDo
 N_FRAMES = 30                # frames averaged per view
 MAX_JITTER_PX = 0.5          # a view is rejected if the corners moved more than this while averaging
 STILL_MM = 1.5               # a touch is rejected if the fingertip moved more than this in 0.25 s
-STILL_DEG = 0.3              # an arm-pose reading is rejected if a joint moved more than this
+STILL_DEG = 1.0              # wrist level: refused if a joint moved more than this while reading (still moving
+                             # into place); rest / initial are waypoints, recorded as held
 MIN_SENS = 0.4               # wrist level: the fingers must point clearly forward, not straight down
 HOLD_GAP = 1.0               # s; SPACE repeats arriving within this gap count as "key held"
 GRID = 0.02                  # m, sweep coverage cell
@@ -103,6 +104,12 @@ def footer(img, msg: str = "") -> None:
     if msg:
         put(img, msg, (10, img.shape[0] - 34), RED, 0.5)
     put(img, NAV, (10, img.shape[0] - 10), GREY, 0.45)
+
+
+def big(img, width: int = 1280) -> tuple[np.ndarray, float]:
+    """The frame upscaled to at least `width` px, so the instruction lines fit; and the scale."""
+    s = max(1.0, width / img.shape[1])
+    return (cv2.resize(img, None, fx=s, fy=s) if s > 1 else img.copy()), s
 
 
 def grab_average(cam, last_fn, n: int = N_FRAMES, timeout: float = 4.0):
@@ -402,7 +409,7 @@ ARM_TEXT = {
     "level": "WRIST LEVEL: open the jaw a few cm by hand, rest BOTH fingertips on the table, fingers forward and "
              "down, SPACE. Two spots.",
     "rest": "REST: fold the arm into the pose where it lies on itself without support, SPACE",
-    "initial": "INITIAL: hold the arm where its work should start from (above the table, clear of the markers), SPACE",
+    "initial": "INITIAL: hold the arm where its work should start (above the table, clear of the markers), SPACE. Roughly",
 }
 
 
@@ -454,7 +461,7 @@ def run_arm(cam, arm, sess: Path) -> str:
     while True:
         f = cam.read(timeout=2.0, newer_than=last_fn)
         last_fn = f.frame_number
-        img = (f.img * 0.4).astype(np.uint8)
+        img, _ = big((f.img * 0.4).astype(np.uint8))
         s = arm.latest()
         put(img, "4 ARM: the gripper is remounted every day -> WRIST LEVEL again. ENTER keeps what is saved",
             (10, 24), YELLOW, 0.6)
@@ -499,8 +506,8 @@ def run_arm(cam, arm, sess: Path) -> str:
                 msg = "no joint readings"
                 continue
             q, moved = r
-            if moved > STILL_DEG:
-                msg = f"moved {moved:.1f} deg while reading: hold still, SPACE again"
+            if part == "level" and moved > STILL_DEG:
+                msg = f"moved {moved:.1f} deg while reading: let the fingertips settle, SPACE again"
             elif part == "level":
                 corr, sens = level_now(q)
                 if sens < MIN_SENS:
@@ -564,7 +571,7 @@ def run_ball(cam, sess: Path) -> str:
         while True:
             f = cam.read(timeout=2.0, newer_than=last_fn)
             last_fn = f.frame_number
-            img = f.img.copy()
+            img, sc = big(f.img)
             if trk is not None:
                 for name, which, ch, _ in SLIDERS:
                     cur[which][ch] = cv2.getTrackbarPos(name, BALL_WIN)
@@ -572,11 +579,11 @@ def run_ball(cam, sess: Path) -> str:
                 det = trk.detect(f.img)
                 seen.append(det is not None)
                 if det is not None:
-                    cv2.circle(img, ipt(det.uv), int(max(det.radius_px, 4)) + 4, GREEN, 2)
-                    put(img, f"ball at x {det.xy[0]:.3f} y {det.xy[1]:+.3f} m", ipt(det.uv + [12, -12]), GREEN, 0.45)
+                    cv2.circle(img, ipt(det.uv * sc), int(max(det.radius_px * sc, 4)) + 4, GREEN, 2)
+                    put(img, f"ball at x {det.xy[0]:.3f} y {det.xy[1]:+.3f} m", ipt(det.uv * sc + [12, -12]), GREEN, 0.45)
                 if trk.last_mask is not None:
                     mk, (ox, oy) = trk.last_mask
-                    full = np.zeros(img.shape[:2], np.uint8)
+                    full = np.zeros(f.img.shape[:2], np.uint8)
                     full[oy:oy + mk.shape[0], ox:ox + mk.shape[1]] = mk
                     inset = cv2.resize(cv2.cvtColor(full, cv2.COLOR_GRAY2BGR), (img.shape[1] // 3, img.shape[0] // 3))
                     img[-inset.shape[0] - 40:-40, -inset.shape[1]:] = inset
