@@ -103,7 +103,11 @@ def main():
         c.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, fps)        # macOS: colour needs depth on
         c.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         pr = p.start(c)
-        p.wait_for_frames(5000)                  # make sure frames actually arrive
+        try:
+            p.wait_for_frames(5000)              # make sure frames actually arrive
+        except RuntimeError:
+            p.stop()                             # else this process keeps the camera and every retry fails
+            raise
         return p, pr
 
     try:
@@ -114,10 +118,6 @@ def main():
         # root: stop those services (macOS restarts them when an app needs a camera), reset, retry once.
         print(f"start failed ({str(e).strip().splitlines()[-1]}); freeing the camera from macOS's camera "
               "services and retrying", flush=True)
-        try:
-            pipe.stop()  # noqa: F821  (only if start() got that far)
-        except Exception:  # noqa: BLE001
-            pass
         subprocess.run(["killall", "VDCAssistant", "cameracaptured"], capture_output=True)
         time.sleep(1.5)
         try:
@@ -174,13 +174,17 @@ def main():
             pipe.stop()
         except RuntimeError:
             pass
-        try:
-            pipe, prof = start(*new)
-            mode = new
-        except RuntimeError as e:
-            print(f"cannot stream {new[0]}x{new[1]}@{new[2]} ({str(e).strip().splitlines()[-1]}); staying at "
-                  f"{mode[0]}x{mode[1]}@{mode[2]}", flush=True)
-            pipe, prof = start(*mode)
+        for i, want in enumerate((new, new, mode, mode)):     # each twice: after a stop the camera can still be busy
+            if i:
+                time.sleep(1.0)
+            try:
+                pipe, prof = start(*want)
+                break
+            except RuntimeError as e:
+                print(f"cannot stream {want[0]}x{want[1]}@{want[2]} ({str(e).strip().splitlines()[-1]})", flush=True)
+        else:
+            raise SystemExit("the camera did not restart: replug it, then ./rig camera start")
+        mode = want
         header[0] = make_header(prof, mode[2])
         with latest.cond:
             latest.item = None                   # no old-size frame for the next client
