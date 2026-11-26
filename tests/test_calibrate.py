@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 import sim_rig  # noqa: E402
-from eaiproject import arm, markers, real_intercept  # noqa: E402
+from eaiproject import arm, cli, markers, real_intercept  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.ball_intercept_env import BallInterceptEnv  # noqa: E402
 
@@ -86,6 +87,8 @@ class SimRigCase(unittest.TestCase):
                                               MAP_PATH=self.tmp / "config" / "rig_map.json"))
         self.enterContext(mock.patch.object(real_intercept, "CAL_DIR", self.out_dir))
         self.enterContext(mock.patch.object(arm, "PATH", self.tmp / "config" / "arm.json"))
+        self.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))   # the scripts' Ctrl+C = q
+        self.addCleanup(setattr, cli, "_pressed", False)
         self.world = sim_rig.World()
         self.cam, self.arm = sim_rig.FakeCamera(self.world), sim_rig.FakeArm(self.world, BIAS)
 

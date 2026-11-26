@@ -42,6 +42,7 @@ KILL_OLD=""
 [ -n "$OLD" ] && KILL_OLD="kill -9 $OLD 2>/dev/null; sleep 1;"
 osascript -e "do shell script \"$KILL_OLD cd $T; .venv/bin/python rs_server.py $ARGS < /dev/null > $T/rs_server.log 2>&1 &\" with administrator privileges" &
 OSA=$!
+trap 'kill "$OSA" 2>/dev/null; exit 130' INT TERM   # Ctrl+C while waiting: close the password helper too
 started=""
 for i in $(seq 1 600); do                       # up to 2.5 min: time to type the password
   if nc -z 127.0.0.1 8770 2>/dev/null; then started=1; break; fi

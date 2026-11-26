@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import signal
 import sys
 import time
 import unittest
@@ -58,6 +60,26 @@ class ViewersTest(SimRigCase):
         for r in rows:
             self.assertLess(float(r["err_mm"]), 4.0, r)
         self.assertEqual(len(list(self.out_dir.glob("check_sim1_*.png"))), 1)
+
+    def test_ctrl_c_in_check_is_q(self):
+        """Ctrl+C in the terminal (a real SIGINT) ends check like q: the recorded rows are saved."""
+        world, arm = self.world, self.arm
+        ctrl_c = (None, lambda: os.kill(os.getpid(), signal.SIGINT))
+        steps = [(None, None)] * 2 + [(None, lambda: arm.touch(world.truth["107"][1])), (None, None), (" ", None), ctrl_c]
+        code, out = self.run_script("check", [], steps + [(None, lambda: self.fail("still running after Ctrl+C"))],
+                                    cam=self.cam2)
+        self.assertEqual(code, 0, out)
+        self.assertIn("appended 1 rows", out)
+
+    def test_ctrl_c_in_calibrate_is_q_and_keeps_the_ball_colour(self):
+        self.world.ball = (0.50, 0.10)
+        ctrl_c = (None, lambda: os.kill(os.getpid(), signal.SIGINT))
+        steps = [(None, None)] * 2 + [("a", None), (None, None), ctrl_c]
+        code, out = self.run_script("calibrate", ["--session", "cc", "--step", "ball"],
+                                    steps + [(None, lambda: self.fail("still running after Ctrl+C"))])
+        self.assertEqual(code, 0, out)
+        self.assertIn("ball colour saved", out)
+        self.assertTrue((self.out_dir / "ball_hsv.json").exists())
 
     def test_check_runs_with_two_markers_and_refuses_with_none(self):
         cam3 = sim_rig.FakeCamera(self.world, 640, 480)

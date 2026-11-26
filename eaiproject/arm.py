@@ -24,6 +24,7 @@ arm where it is and releases it after another ENTER.
 from __future__ import annotations
 
 import json
+import signal
 import threading
 import time
 from collections import deque
@@ -275,6 +276,30 @@ class ArmLink:
 
 
 # --------------------------------------------------------------------------------- powered
+@contextmanager
+def _ctrl_c(note: str | None = None):
+    """Ctrl+C cannot cut the block short. With a `note` it is ignored (the note is printed, e.g. while
+    the arm is held); without, it is raised right after the block (CAN sequences that must not stop
+    halfway: enabling, releasing)."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    hit = []
+
+    def handler(*_):
+        hit.append(1)
+        if note:
+            print(note, flush=True)
+
+    old = signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, old)
+    if hit and note is None:
+        raise KeyboardInterrupt
+
+
 def ease(n: int) -> np.ndarray:
     """n fractions from just above 0 to 1 that start and end at rest (smoothstep)."""
     u = np.linspace(0.0, 1.0, n + 1)[1:]
@@ -307,21 +332,22 @@ class Arm:
 
     def enable(self) -> np.ndarray:
         """Position mode, speed limit, current cap and target = where each joint is now, then power
-        on. Returns the (model) pose it holds."""
-        q = self.read()
-        for m, qm in zip(ARM_IDS, self.cfg.to_motor(q)):
-            self.rs.stop(m)
-            self.rs.write_param_u8(m, P_RUN_MODE, RUN_MODE_POSITION)
+        on. Returns the (model) pose it holds. Runs whole: a Ctrl+C meanwhile comes right after."""
+        with _ctrl_c():
+            q = self.read()
+            for m, qm in zip(ARM_IDS, self.cfg.to_motor(q)):
+                self.rs.stop(m)
+                self.rs.write_param_u8(m, P_RUN_MODE, RUN_MODE_POSITION)
+                time.sleep(0.01)
+                if self.rs.read_param_u8(m, P_RUN_MODE) != RUN_MODE_POSITION:
+                    raise RuntimeError(f"joint {m} did not switch to position mode")
+                self.rs.write_param_f32(m, P_LIMIT_SPD, self.speed)
+                self.rs.write_param_f32(m, P_LIMIT_CUR, self.caps[m])
+                self.rs.write_param_f32(m, P_LOC_REF, float(qm))
             time.sleep(0.01)
-            if self.rs.read_param_u8(m, P_RUN_MODE) != RUN_MODE_POSITION:
-                raise RuntimeError(f"joint {m} did not switch to position mode")
-            self.rs.write_param_f32(m, P_LIMIT_SPD, self.speed)
-            self.rs.write_param_f32(m, P_LIMIT_CUR, self.caps[m])
-            self.rs.write_param_f32(m, P_LOC_REF, float(qm))
-        time.sleep(0.01)
-        for m in (6, 5, 4, 1, 3, 2):                     # the joints carrying the arm last
-            self.rs.enable(m)
-        self.enabled = True
+            self.enabled = True
+            for m in (6, 5, 4, 1, 3, 2):                 # the joints carrying the arm last
+                self.rs.enable(m)
         return q
 
     def command(self, q) -> None:
@@ -352,11 +378,13 @@ class Arm:
         return self.read()
 
     def release(self) -> None:
-        for _ in range(3):
-            for m in ARM_IDS:
-                self.rs.stop(m)
-            time.sleep(0.01)
-        self.enabled = False
+        """Stop every joint (three rounds). Runs whole: a Ctrl+C meanwhile comes right after."""
+        with _ctrl_c():
+            for _ in range(3):
+                for m in ARM_IDS:
+                    self.rs.stop(m)
+                time.sleep(0.01)
+            self.enabled = False
 
     def close(self) -> None:
         try:
@@ -370,8 +398,9 @@ class Arm:
 def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
     Without recorded poses it starts and ends where the arm was resting. Ctrl+C (or an error) holds
-    the arm where it is and releases it after ENTER; a second Ctrl+C releases at once. A Ctrl+C that
-    comes before the work starts is raised again (the work never runs)."""
+    the arm where it is and releases it after ENTER; more Ctrl+C presses meanwhile keep it held (an
+    extra press never drops it). A Ctrl+C during the work ends the work: the caller goes on after its
+    `with` (saves its log). One before the work started is raised again (the work never runs)."""
     cfg, ask = cfg or load(), ask or input
     arm = Arm(cfg, rs, speed)
     working = False
@@ -388,12 +417,17 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
         arm.go(rest)
     except (Exception, KeyboardInterrupt) as e:
         if arm.enabled:
-            try:
-                arm.hold()
-            except Exception:  # noqa: BLE001  (lost the bus: nothing to hold with)
-                pass
             why = "Ctrl+C" if isinstance(e, KeyboardInterrupt) else f"{type(e).__name__}: {e}"
-            ask(f"\n{why} -> holding. Support the arm, then ENTER releases it... ")
+            with _ctrl_c(note="\n(the arm is held: support it, then ENTER releases it)"):
+                try:
+                    arm.hold()
+                except Exception:  # noqa: BLE001  (lost the bus: nothing to hold with)
+                    pass
+                try:
+                    ask(f"\n{why} -> holding. Support the arm, then ENTER releases it... ")
+                except EOFError:                         # stdin closed: release
+                    pass
+                arm.release()
         if not (working and isinstance(e, KeyboardInterrupt)):
             raise
     finally:

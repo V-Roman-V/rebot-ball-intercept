@@ -20,10 +20,12 @@ it to the size it works at.
 """
 from __future__ import annotations
 
+import signal
+import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -204,7 +206,7 @@ def main(argv: list[str]) -> int:
         print(f"camera server {'running at ' + fmt(cur) if cur else 'not running'}   (./rig camera start|stop|hd|vga)")
         return 0
     if task == "test":
-        os.execv(sys.executable, [sys.executable, "-m", "unittest", "discover", "-s", "tests", *args])
+        os.execv(sys.executable, [sys.executable, "-m", "unittest", "discover", "-c", "-s", "tests", *args])
     if task not in TASKS:
         print(f"unknown task '{task}'\n{__doc__}")
         return 2
@@ -218,4 +220,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    from eaiproject import cli
+    cli.run(main, sys.argv[1:])

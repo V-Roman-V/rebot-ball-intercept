@@ -5,10 +5,14 @@ position-mode arm on a fake CAN bus (enable, moves, the powered route, Ctrl+C).
 """
 from __future__ import annotations
 
+import io
+import os
+import signal
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -256,6 +260,42 @@ class PoweredTest(unittest.TestCase):
             with arm.powered(self.CFG, bus, ask=asks.append):
                 raise ValueError("planner failed")
         self.assertIn("ValueError: planner failed", asks[-1])
+        self.assertEqual(bus.on, set())
+
+    def test_more_ctrl_c_while_held_keep_it_held(self):
+        """Real SIGINTs at the hold prompt (Ctrl+C pressed again) are absorbed: only ENTER releases."""
+        bus, asks, before = FakeBus(REST), [], signal.getsignal(signal.SIGINT)
+
+        def ask(s):
+            asks.append(s)
+            if "holding" in s:
+                for _ in range(2):
+                    os.kill(os.getpid(), signal.SIGINT)
+                    self.assertEqual(len(bus.on), 6)                            # still held
+
+        out = io.StringIO()
+        with no_sleep(), redirect_stdout(out), arm.powered(self.CFG, bus, ask=ask) as a:
+            a.go(WORK)
+            raise KeyboardInterrupt
+        self.assertEqual(out.getvalue().count("the arm is held"), 2)
+        self.assertEqual(bus.on, set())                                         # released after ENTER
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+    def test_ctrl_c_while_enabling_finishes_it_then_holds(self):
+        bus, asks = FakeBus(REST), []
+        enable = bus.enable
+
+        def enable_with_ctrl_c(m):
+            if not bus.enable_order:
+                os.kill(os.getpid(), signal.SIGINT)                             # pressed at the first enable
+            enable(m)
+
+        bus.enable = enable_with_ctrl_c
+        with no_sleep(), self.assertRaises(KeyboardInterrupt):
+            with arm.powered(self.CFG, bus, ask=asks.append):
+                self.fail("must not run")
+        self.assertEqual(sorted(bus.enable_order), list(ARM_IDS))               # not cut halfway
+        self.assertIn("Ctrl+C -> holding", asks[-1])
         self.assertEqual(bus.on, set())
 
     def test_ctrl_c_at_the_first_prompt_powers_nothing(self):

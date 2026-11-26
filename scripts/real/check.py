@@ -22,10 +22,12 @@ Recorded rows are appended to outputs/calibration/validation.csv (with --label a
 """
 from __future__ import annotations
 
+import signal
+import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
 import argparse
 import csv
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -34,6 +36,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, STATUS_COLOR, WHITE, YELLOW, draw_table_grid, ipt,  # noqa: E402
@@ -91,6 +94,7 @@ def main() -> int:
     kk = 2 if cam.width < 900 else 1
     cv2.resizeWindow(win, cam.width * kk, cam.height * kk)
     ball_mode, msg, last_fn, shots = False, "", None, 0
+    cli.ctrl_c_quits()
     while True:
         f = cam.read(timeout=2.0, newer_than=last_fn)
         last_fn = f.frame_number
@@ -173,7 +177,7 @@ def main() -> int:
         cv2.imshow(win, img)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("q") or window_closed(win):
+        if key == ord("q") or window_closed(win) or cli.ctrl_c():
             break
         if key == ord("c"):
             try:
@@ -230,4 +234,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run(main)

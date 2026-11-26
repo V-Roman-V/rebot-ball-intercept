@@ -13,14 +13,17 @@ where it is, and ENTER then releases it (support the arm first).
 """
 from __future__ import annotations
 
-import argparse
+import signal
 import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
+import argparse
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.ball_intercept_env import BallInterceptEnv  # noqa: E402
@@ -87,4 +90,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run(main)

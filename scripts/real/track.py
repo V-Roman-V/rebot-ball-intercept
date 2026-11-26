@@ -17,8 +17,10 @@ The ball colour is the one saved in ./rig calibrate, step 5 (with the colour mas
 """
 from __future__ import annotations
 
-import json
+import signal
 import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
+import json
 import threading
 import time
 from pathlib import Path
@@ -29,6 +31,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from eaiproject import cli  # noqa: E402
 from eaiproject.real_intercept import (HostClock, InterceptPlanner, camera_calib, hsv_saved_time,  # noqa: E402
                                        locate_camera, make_tracker, table_z)
 from eaiproject import rig_calib  # noqa: E402
@@ -101,6 +104,7 @@ def main() -> int:
     frame_i, sim = 0, None
     fps, t_prev = 0.0, time.monotonic()
     msg, msg_t = "", 0.0
+    cli.ctrl_c_quits()
     while True:
         f = cam.read(timeout=2.0, newer_than=last_fn)
         last_fn = f.frame_number
@@ -209,7 +213,7 @@ def main() -> int:
         cv2.imshow(WIN, np.hstack([img, sim]))
 
         k = cv2.waitKey(1) & 0xFF
-        if k == ord("q") or window_closed(WIN):
+        if k == ord("q") or window_closed(WIN) or cli.ctrl_c():
             break
         if k == ord("c"):
             try:
@@ -241,4 +245,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run(main)

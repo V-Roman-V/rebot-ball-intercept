@@ -27,10 +27,12 @@ ENTER next step, BACKSPACE previous, 1-5 jump, q quit. Everything is saved as it
 """
 from __future__ import annotations
 
+import signal
+import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
 import argparse
 import json
 import math
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -40,6 +42,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import markers, rig_report  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
@@ -89,7 +92,7 @@ def no_readings(arm) -> str:
 
 def nav(key: int) -> str | None:
     """Step navigation shared by all steps: where to go for this key, or None."""
-    if key == ord("q") or window_closed(WIN):
+    if key == ord("q") or window_closed(WIN) or cli.ctrl_c():                  # Ctrl+C in the terminal = q
         return "quit"
     if key in (13, 10):
         return "next"
@@ -732,6 +735,7 @@ def main() -> int:
     step, code = start_step(sess, args), 0
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, 1280, 720)
+    cli.ctrl_c_quits()
     try:
         while step != "quit":
             mode = HD if step in ("views", "touch", "sweep") else VGA if step == "ball" else None
@@ -768,4 +772,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run(main)

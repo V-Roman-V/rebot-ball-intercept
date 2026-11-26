@@ -14,8 +14,10 @@ Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
 """
 from __future__ import annotations
 
-import argparse
+import signal
 import sys
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
+import argparse
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.real_intercept import (BALL_R, HostClock, InterceptPlanner, camera_calib, locate_camera,  # noqa: E402
@@ -128,4 +131,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    cli.run(main)
