@@ -85,13 +85,61 @@ is in [docs/real_rig.md](docs/real_rig.md).
 The table map is committed (`config/rig_map.json`). Daily values, logs and camera frames are
 written to `outputs/`, which is git-ignored.
 
+### A new day with a new marker layout
+
+About 40 minutes from bare table to catching. Before you start: arm power on (the motors stay
+off), the PCAN-USB adapter plugged in, the camera on a USB 3 port of the Mac, the gripper mounted.
+
+1. **Markers.** Tape the 4 ArUco markers flat on the table: at least 2 within the arm's reach (they
+   get touched), at least 1 more than 0.5 m from the arm base, not in a line, spread out. Keep a
+   white margin of 1 cm or more and no tape on the black border.
+2. **Camera.** `./rig camera start` (macOS asks for your password), then `./rig view`: every marker
+   should be outlined. Close the window with `q`.
+3. **Table map**, `./rig calibrate --new` (about 20 min, one window, everything is saved as you go):
+   - *1 Views:* arm and hands off the markers, camera still, SPACE. Repeat from 6-8 camera positions:
+     left, right, front, low and high, near and far. Then put the camera where it will stay. ENTER.
+   - *2 Touch:* support the unpowered arm, rest the **closed** fingertips on the corner circled in
+     yellow, SPACE. All 4 corners of every marker you can reach (`n` next marker). ENTER.
+   - *3 Sweep:* hold SPACE and slide the closed fingertips slowly over the table until the yellow
+     box is 70 % covered. ENTER solves.
+   - *Result:* accept reprojection < 1.5 px, touches < 5 mm, sweep < 1.5 mm and no warnings; each
+     warning says what to redo (`1`-`3` jump back). ENTER.
+4. **Arm and ball** (same window, steps 4 and 5, 2 min):
+   - *4 Arm:* open the jaw about 3 cm by hand, both fingertips on the table, fingers tilted forward,
+     SPACE, then again at another spot (this is the wrist zero). `n` → **rest**: fold the arm onto
+     itself, let go, SPACE. `n` → **initial**: hold the arm above the table, clear of the markers,
+     SPACE. ENTER.
+   - *5 Ball:* the ball alone on the table, hands away, `a`. Roll it: the ring must follow it and the
+     mask must show only the ball. ENTER saves and closes.
+5. **Commit the map:** `git add config/rig_map.json && git commit -m "Table map: new marker layout"`.
+6. **Simple tests**, arm unpowered:
+   - `./rig check`: hands off the markers for the first second. Rest the closed fingertips on a
+     marker corner (error < 5 mm), then `b` and the ball on a marker centre (< 5 mm). `q`.
+   - `./rig track`: roll the ball a few times. The predicted crossing should land where the ball
+     crosses the line; `q` prints the prediction error over the rolls (the open jaw catches within
+     ±28 mm).
+7. **Powered tests:** `./rig move --heights 60`, ENTER powers the arm, and the jaw passes along the
+   intercept line 60 mm above the table: check the printed height with a ruler. Then `./rig move`
+   for 60 / 35 / 20 mm.
+8. **Catch:** `./rig catch`. Wait for `camera located: OK`, open the jaw by hand, press ENTER in the
+   terminal: the arm goes from rest to the initial pose and waits at the intercept line. Roll the
+   ball. `q` in the window brings the arm back to rest and releases it.
+
+**Next days, same markers:** `./rig calibrate` opens at step 4. Redo the wrist level (the gripper
+is remounted daily), press ENTER through the rest, then `./rig catch`. If the camera was moved, there
+is nothing to redo: every task locates it from the markers when it starts.
+
+Ctrl+C in the terminal stops any task, like `q`. Details and troubleshooting:
+[docs/real_rig.md](docs/real_rig.md).
+
 ### Safety
 
 The calibration and check tools open the CAN bus read-only: the wrapper refuses enable, command and
 parameter writes to any motor not allowed. The powered tasks use the motors' own position mode with
-a firmware speed limit and current cap, ask for ENTER before powering, and hold the arm on Ctrl+C
-until you support it and press ENTER to release. Joints 2 and 3 carry the arm's weight and drop when
-released. See [docs/real_rig.md#powered-runs](docs/real_rig.md#powered-runs).
+a firmware speed limit and current cap, and ask for ENTER before powering. Ctrl+C holds the arm
+where it is: support it and press ENTER to release it, or press Ctrl+C again to release it at once.
+Joints 2 and 3 carry the arm's weight and drop when released. See
+[docs/real_rig.md#powered-runs](docs/real_rig.md#powered-runs).
 
 ## How it works
 
