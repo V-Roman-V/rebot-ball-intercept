@@ -26,7 +26,7 @@ from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.ball_intercept_env import BallInterceptEnv  # noqa: E402
 from eaiproject.kinematics import Fingertip  # noqa: E402
 
-MAX_IK_ERR = 0.003           # m: a pass the arm cannot reach better than this is not run
+MAX_IK_ERR = 0.003           # m: passes the arm reaches worse than this run anyway, with a warning
 
 
 def plan(env: BallInterceptEnv, plane, heights, y_max: float, speed: float):
@@ -59,8 +59,8 @@ def main() -> int:
     env, tip = BallInterceptEnv("forward"), Fingertip()
     passes, err = plan(env, plane, [h / 1000 for h in args.heights], args.y, args.speed)
     if err > MAX_IK_ERR:
-        print(f"the arm cannot reach the passes (IK error {err * 1000:.1f} mm): smaller --y or higher --heights")
-        return 1
+        print(f"CHECK: the arm reaches the passes only within {err * 1000:.1f} mm (the heights printed below are what "
+              "it really does); smaller --y or higher --heights fit better")
     cfg = arm_mod.load()
     secs = sum(len(p) for _, p in passes) / arm_mod.RATE
     print(f"{len(passes)} passes along x = {env.gate_x:.2f} m, y -{args.y:.2f} .. +{args.y:.2f} m, "

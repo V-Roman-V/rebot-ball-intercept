@@ -53,8 +53,8 @@ def setup(cam, rig_map):
     print(f"camera located: {res.status}, {res.reproj_rms_px:.2f} px / {res.table_rms_mm:.1f} mm on {len(res.used)} markers "
           f"{res.used}; position x {res.camera_position[0]:.2f} y {res.camera_position[1]:.2f} z {res.camera_position[2]:.2f} m",
           flush=True)
-    if res.rejected:
-        print(f"WARNING: marker {res.rejected} does not fit the map (moved on the table?)", flush=True)
+    for w in res.warnings:
+        print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
     return calib, make_tracker(calib, rig_map.plane), rig_calib.PoseMonitor(rig_map, calib.K, calib.dist, calib.rvec, calib.tvec)
 

@@ -25,8 +25,8 @@ the repository root.
 | Ball | orange ping-pong ball, 44 mm |
 
 Marker layout: at least 2 within the arm's reach (they get touched), at least 1 further than 0.50 m
-from the base (the camera cannot be located without one in view), not in a line, as far apart as
-the arm reaches. Each needs a white margin of 1 cm or more and no tape over the black border.
+from the base (without one in view the camera pose is loose far down the table), not in a line, as
+far apart as the arm reaches. Each needs a white margin of 1 cm or more and no tape over the black border.
 Measure one printed marker with a ruler: it must match `SIZES` in `eaiproject/markers.py` within
 0.3 mm, because the camera measures every distance in units of the marker size.
 
@@ -109,18 +109,25 @@ read-only. Support the unpowered arm while moving it: joints 2 and 3 drop. It al
 the arm (off, or no CAN adapter): steps 2-4 then show `ARM NOT CONNECTED` and pick the arm up by
 themselves once it answers, without a restart. `./rig check` does the same.
 
+The quality rules below never block: every reading is recorded, and one that breaks a rule gets a
+red `CHECK:` line saying what is weak (`u` undoes it). The solve and camera location work the same
+way: they refuse only when nothing can be computed (no marker in view, no marker with two touched
+corners), and otherwise warn.
+
 ### Table map (steps 1-3, once)
 
 **1 Views.** Arm and hands away from the markers. Put the camera somewhere, wait until it is still,
 SPACE (30 frames are averaged). Move it and repeat: at least 5 views, better 6-8, from the left,
-right and front, low (about 30°) to high (about 60°), near and far. Each view needs 3 or more
-markers. A view is refused if the corners moved more than 0.5 px while averaging.
+right and front, low (about 30°) to high (about 60°), near and far. Best with 3 or more markers in
+each view and the camera still (corners steady within 0.5 px while averaging). A view that does not
+link to a touched marker is left out of the solve, with a warning.
 
 **2 Touch.** The window circles one corner in yellow (TL, TR, BR, BL; TL has the filled dot). Rest
 the **closed** fingertips on exactly that corner, pressed on the table, hold still, SPACE. Any
 gripper angle. After the 4 corners `n` goes to the next marker (`p` back); pass the ones you cannot
-reach with `n`. Touch all 4 corners of **at least 2 markers**, 3 if possible. A red `CHECK:` line
-means the point does not fit the others (wrong corner, tip off the table): `u` and touch it again.
+reach with `n`. Best: all 4 corners of 2 or more markers (the solve needs 2 corners of one). A red
+`CHECK:` line means the point does not fit the others (wrong corner, tip off the table) or the tip
+moved while recording: `u` and touch it again.
 
 **3 Sweep.** **Hold SPACE** and slide the closed fingertips slowly over the table, at any gripper
 angle (if holding the key does not record, `r` toggles recording). Cover the yellow box around the
@@ -192,9 +199,10 @@ the pose says: press `c`.
 |---|---|
 | `camera located: OK` (< 1.5 px, < 5 mm) | go on |
 | `camera located: WARN` (1.5-3 px) | usable; check that the camera is fixed, press `c` |
-| `CANNOT LOCATE THE CAMERA: only N map marker(s) visible` | move the camera closer or higher: 3 markers must be read |
-| `CANNOT LOCATE THE CAMERA: no marker far from the arm` | aim further down the table |
-| `marker [...] does not fit the map` | it moved on the table: fine for today (left out), calibrate again before relying on it |
+| `CHECK: only N map marker(s) in view` | works; the pose is better with 3 or more: move the camera closer or higher |
+| `CHECK: no marker far from the arm in view` | works; the pose is loose far down the table: aim further down |
+| `CHECK: marker ... does not fit the map` | it moved on the table: fine for today (left out), calibrate again before relying on it |
+| `CANNOT LOCATE THE CAMERA: no map marker visible` | aim the camera at the table; hands and arm off the markers |
 
 ## Powered runs
 

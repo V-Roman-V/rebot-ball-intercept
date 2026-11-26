@@ -59,12 +59,16 @@ class ViewersTest(SimRigCase):
             self.assertLess(float(r["err_mm"]), 4.0, r)
         self.assertEqual(len(list(self.out_dir.glob("check_sim1_*.png"))), 1)
 
-    def test_check_refuses_with_too_few_markers(self):
+    def test_check_runs_with_two_markers_and_refuses_with_none(self):
         cam3 = sim_rig.FakeCamera(self.world, 640, 480)
-        cam3.set_pose((0.9, 0.0, 0.5), (0.30, 0.0, 0.0))
+        cam3.set_pose((0.9, 0.0, 0.5), (0.30, 0.0, 0.0))                      # two markers in view
+        code, out = self.run_script("check", [], cam=cam3)
+        self.assertEqual(code, 0, out)
+        self.assertIn("CHECK: only 2 map marker(s) in view", out)
+        cam3.set_pose((0.9, 0.0, 0.5), (0.9, 1.5, 0.6))                        # looking away from the table
         code, out = self.run_script("check", [], cam=cam3)
         self.assertEqual(code, 1, out)
-        self.assertIn("CANNOT LOCATE THE CAMERA", out)
+        self.assertIn("CANNOT LOCATE THE CAMERA: no map marker visible", out)
 
     def test_track_notices_a_moved_camera(self):
         """The pose monitor warns after the camera is bumped; c locates it again."""

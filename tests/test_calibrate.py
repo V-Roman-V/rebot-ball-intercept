@@ -182,6 +182,14 @@ class CalibrateTest(SimRigCase):
         self.assertTrue((self.out_dir / "ball_hsv.json").exists())
         self.assertIn("arm: wrist zero +1", out)                                # the summary at the end
 
+    def test_a_view_with_two_markers_is_recorded_with_a_note(self):
+        self.cam.set_pose((0.9, 0.0, 0.5), (0.30, 0.0, 0.0))                  # only two markers in view
+        code, out = self.run_script("calibrate", ["--session", "few"], [(None, None), (" ", None), (None, None)])
+        views = json.loads((self.tmp / "rig_calib/few/views.json").read_text())["views"]
+        self.assertEqual(len(views), 1, out)
+        self.assertEqual(len(views[0]["corners"]), 2)
+        self.assertIn("CHECK view_00: only 2 marker(s) in this view", out)
+
     def test_starts_without_the_arm_and_picks_it_up(self):
         tries = iter([ConnectionError("no answer")] * 2)
 
@@ -244,19 +252,18 @@ class GuidedCornersTest(unittest.TestCase):
         self.assertIn("107", guided)
         for k in guided:
             self.assertLess(np.abs(found[k] - self.truth_px(k)).max(), 0.6, k)
-        res = rc.relocalize(self.map, self.cam.K, self.cam.dist, plain, guided={k: found[k] for k in guided},
-                            min_markers=len(plain))
+        res = rc.relocalize(self.map, self.cam.K, self.cam.dist, plain, guided={k: found[k] for k in guided})
         self.assertEqual(res.guided, guided)
         self.assertLess(res.reproj_rms_px, 0.5)
         self.assertLess(np.linalg.norm(res.camera_position - [1.55, 0.30, 0.95]) * 1000, 5.0)
 
-    def test_guided_markers_do_not_relax_the_rules(self):
+    def test_guided_markers_do_not_count_for_the_warnings(self):
         img = self.cam.read().img
         plain = markers.detect(img)
         found, guided = rc.detect_with_map(img, self.map, self.cam.K, self.cam.dist)
         two = {k: plain[k] for k in sorted(plain)[:2]}
-        with self.assertRaisesRegex(rc.CalibrationError, "need at least 3"):
-            rc.relocalize(self.map, self.cam.K, self.cam.dist, two, guided={k: found[k] for k in found if k not in two})
+        res = rc.relocalize(self.map, self.cam.K, self.cam.dist, two, guided={k: found[k] for k in found if k not in two})
+        self.assertTrue(any("only 2 map marker" in w for w in res.warnings), res.warnings)
 
     def test_covered_marker_is_not_invented(self):
         img = self.cam.read().img

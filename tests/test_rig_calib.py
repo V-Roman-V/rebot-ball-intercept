@@ -251,25 +251,56 @@ class WarningsAndFailuresTest(unittest.TestCase):
         self.assertGreater(sol.report["touch_scale_percent"], 0.6)
         self.assertTrue(any("measure a printed marker" in w for w in sol.warnings), sol.warnings)
 
-    def test_fails_without_touches_or_markers(self):
+    def test_fails_only_when_nothing_can_be_placed(self):
         rig = Rig(0)
-        with self.assertRaises(rc.CalibrationError):
+        with self.assertRaisesRegex(rc.CalibrationError, "touched points"):
             rc.solve_rig(rig.observations([]))
         obs = rig.observations(rig.near)
         for v in obs.views:
-            v.corners = {k: c for k, c in v.corners.items() if k in rig.keys[:2]}
-        with self.assertRaisesRegex(rc.CalibrationError, "table marker"):
+            v.corners = {}
+        with self.assertRaisesRegex(rc.CalibrationError, "no table marker"):
             rc.solve_rig(obs)
 
-    def test_relocalise_refuses_too_few_markers(self):
+    def test_two_markers_solve_with_a_warning(self):
+        rig = Rig(0)
+        obs = rig.observations(rig.near)
+        for v in obs.views:
+            v.corners = {k: c for k, c in v.corners.items() if k in rig.keys[:2]}
+        sol = rc.solve_rig(obs)
+        self.assertEqual(sorted(sol.rig_map.markers), rig.keys[:2])
+        self.assertTrue(any("only 2 table marker" in w for w in sol.warnings), sol.warnings)
+
+    def test_leaves_out_what_is_not_linked(self):
+        """A view that sees only markers no other view sees, none of them touched: left out, with them."""
+        rig = Rig(0)
+        obs = rig.observations(rig.near)
+        far = [k for k in rig.keys if k not in rig.near]
+        island = obs.views[0]
+        island.corners = {k: c for k, c in island.corners.items() if k in far}
+        self.assertTrue(island.corners)
+        for v in obs.views[1:]:
+            v.corners = {k: c for k, c in v.corners.items() if k not in far}
+        sol = rc.solve_rig(obs)
+        self.assertEqual(sorted(sol.rig_map.markers), sorted(rig.near))
+        self.assertNotIn(island.name, sol.cams)
+        self.assertTrue(any("left out" in w and island.name in w for w in sol.warnings), sol.warnings)
+
+    def test_relocalise_warns_on_few_or_near_markers(self):
         rig = Rig(0)
         m = rc.solve_rig(rig.observations(rig.near)).rig_map
         rv, tv = rig.camera()
         det = rig.detect(rv, tv, K_VGA, (640, 480), 0.2)
-        with self.assertRaisesRegex(rc.CalibrationError, "need at least 3"):
-            rc.relocalize(m, K_VGA, DIST, {k: det[k] for k in rig.keys[3:]})
-        with self.assertRaisesRegex(rc.CalibrationError, "far from the arm"):
-            rc.relocalize(m, K_VGA, DIST, {k: det[k] for k in rig.near})
+        true_c = rc.camera_centre(rv, tv)
+        self.assertEqual(rc.relocalize(m, K_VGA, DIST, det).warnings, [])
+        res = rc.relocalize(m, K_VGA, DIST, {k: det[k] for k in rig.keys[3:]})
+        self.assertTrue(any("only 2 map marker" in w for w in res.warnings), res.warnings)
+        res = rc.relocalize(m, K_VGA, DIST, {k: det[k] for k in rig.near})
+        self.assertTrue(any("far from the arm" in w for w in res.warnings), res.warnings)
+        res = rc.relocalize(m, K_VGA, DIST, {k: det[k] for k in rig.near[:1]})         # one marker places it
+        self.assertEqual(len(res.warnings), 2)
+        self.assertLess(np.linalg.norm(res.camera_position - true_c), 0.10)
+        with self.assertRaisesRegex(rc.CalibrationError, "no map marker"):
+            rc.relocalize(m, K_VGA, DIST, {})
 
     def test_relocalise_drops_a_moved_marker(self):
         rig = Rig(0)

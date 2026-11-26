@@ -47,11 +47,12 @@ from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, WHITE, YELLOW, TopDo
                                  window_closed)
 
 N_FRAMES = 30                # frames averaged per view
-MAX_JITTER_PX = 0.5          # a view is rejected if the corners moved more than this while averaging
-STILL_MM = 1.5               # a touch is rejected if the fingertip moved more than this in 0.25 s
-STILL_DEG = 1.0              # wrist level: refused if a joint moved more than this while reading (still moving
-                             # into place); rest / initial are waypoints, recorded as held
-MIN_SENS = 0.4               # wrist level: the fingers must point clearly forward, not straight down
+# Quality checks: every reading is recorded; breaking one only adds a CHECK note (u undoes the reading).
+MAX_JITTER_PX = 0.5          # view: the corners moved more than this while averaging (camera not still?)
+STILL_MM = 1.5               # touch: the fingertip moved more than this in 0.25 s
+STILL_DEG = 1.0              # wrist level: a joint moved more than this while reading (rest / initial: no check)
+MIN_SENS = 0.4               # wrist level: below this the fingers point nearly straight down -> a weak reading
+NO_SENS = 0.05               # ... and below this the roll cannot be read at all: the only refusal
 HOLD_GAP = 1.0               # s; SPACE repeats arriving within this gap count as "key held"
 GRID = 0.02                  # m, sweep coverage cell
 TARGET_X, TARGET_Y = (rc.GATE_X - 0.06, rc.GATE_X + 0.06), (-0.26, 0.26)      # box to cover around the intercept line
@@ -126,7 +127,7 @@ def map_pose(cam, last_fn):
         return None, last_fn
     mean, _, _, g = grab_average(cam, last_fn, 10, 2.0)
     try:
-        res = rc.relocalize(rc.RigMap.load(rc.MAP_PATH), cam.K, cam.dist, mean, require_far=False)
+        res = rc.relocalize(rc.RigMap.load(rc.MAP_PATH), cam.K, cam.dist, mean)
     except rc.CalibrationError:
         return None, g.frame_number
     return (res.rvec, res.tvec), g.frame_number
@@ -145,9 +146,9 @@ def run_views(cam, sess: Path) -> str:
         for k, c in found.items():
             outline(img, c, GREEN, 2, k)
         n = len(views)
-        put(img, f"1 VIEWS: {n} recorded (need {rc.MIN_VIEWS}, 6-8 is better). Hands + arm off the markers, camera still, SPACE",
+        put(img, f"1 VIEWS: {n} recorded ({rc.MIN_VIEWS}+ wanted, 6-8 is better). Hands + arm off the markers, camera still, SPACE",
             (10, 24), YELLOW if n < rc.MIN_VIEWS else GREEN)
-        put(img, f"markers in view: {len(found)}  {sorted(found)}", (10, 48), GREEN if len(found) >= 3 else RED)
+        put(img, f"markers in view: {len(found)}  {sorted(found)}", (10, 48), GREEN if len(found) >= 3 else YELLOW)
         seen = {k: sum(k in v["corners"] for v in views) for k in markers.SIZES}
         put(img, "views per marker: " + "  ".join(f"{k}: {c}" for k, c in seen.items()), (10, 72))
         put(img, "then move the camera: left / right / front, low (30 deg) to high (60 deg), near and far   (u = undo)",
@@ -164,11 +165,8 @@ def run_views(cam, sess: Path) -> str:
         if key == ord(" "):
             mean, jitter, nf, g = grab_average(cam, last_fn)
             last_fn = g.frame_number
-            if len(mean) < 3:
-                msg = f"only {len(mean)} table markers stable in view; need at least 3"
-                continue
-            if max(jitter.values()) > MAX_JITTER_PX:
-                msg = f"corners moved {max(jitter.values()):.2f} px while averaging: let the camera settle, SPACE again"
+            if not mean:
+                msg = "no table marker stable in view: nothing to record"
                 continue
             name = f"view_{int(views[-1]['name'].split('_')[1]) + 1 if views else 0:02d}"
             cv2.imwrite(str(sess / f"{name}.png"), g.img)
@@ -177,14 +175,17 @@ def run_views(cam, sess: Path) -> str:
                           "n_frames": nf, "corners": {k: c.tolist() for k, c in mean.items()},
                           "jitter_px": {k: round(j, 3) for k, j in jitter.items()}, "frame": f"{name}.png"})
             path.write_text(json.dumps({"views": views}, indent=1))
-            msg = ""
-            print(f"{name}: {sorted(mean)}  jitter max {max(jitter.values()):.2f} px", flush=True)
+            notes = ([f"only {len(mean)} marker(s) in this view (3+ link the map better)"] if len(mean) < 3 else []) + \
+                    ([f"corners moved {max(jitter.values()):.2f} px while averaging (camera still?)"]
+                     if max(jitter.values()) > MAX_JITTER_PX else [])
+            msg = f"CHECK {name}: " + "; ".join(notes) + "  (u = undo)" if notes else ""
+            print(f"{name}: {sorted(mean)}  jitter max {max(jitter.values()):.2f} px  {msg}", flush=True)
 
 
 # ----------------------------------------------------------------------------------- touch
-def touch_sanity(touches: list, new: dict, size: float) -> str:
-    """Catches a wrong corner right away (the touch is still recorded; u undoes it)."""
-    out = []
+def touch_sanity(touches: list, new: dict, size: float, moved_mm: float = 0.0) -> str:
+    """Catches a wrong corner or a moving fingertip right away (the touch is still recorded; u undoes it)."""
+    out = [f"the fingertip moved {moved_mm:.1f} mm while recording"] if moved_mm > STILL_MM else []
     zs = [t["p"][2] for t in touches]
     if len(zs) >= 2 and abs(new["p"][2] - np.median(zs)) > 0.012:
         out.append(f"height differs {1000 * (new['p'][2] - np.median(zs)):+.0f} mm from the other touches")
@@ -253,7 +254,7 @@ def run_touch(cam, arm, sess: Path) -> str:
             put(img, f"{'>' if k == cur else ' '} {k:4s} {txt}", (10, y), YELLOW if k == cur else (GREEN if len(d) >= 4 else WHITE), 0.45)
             y += 20
         n_mk = sum(1 for k in keys if len(done(k) - {rc.CENTRE}) >= 2)
-        put(img, f"{len(touches)} touches on {n_mk} marker(s). All 4 corners of every marker within reach, at least 2 markers",
+        put(img, f"{len(touches)} touches on {n_mk} marker(s). Best: all 4 corners of every marker within reach, 2+ markers",
             (10, y + 4), GREEN if n_mk >= 2 else WHITE, 0.45)
         put(img, "s = skip this corner   c = record the marker centre (optional)   u = undo", (10, y + 24), GREY, 0.42)
         if s is not None:
@@ -285,12 +286,10 @@ def run_touch(cam, arm, sess: Path) -> str:
                 msg = "all 4 corners of this marker are done: n = next marker, ENTER = next step"
             elif st is None:
                 msg = no_readings(arm)
-            elif st[1] * 1000 > STILL_MM:
-                msg = f"the fingertip moved {st[1] * 1000:.1f} mm: hold still and press again"
             else:
                 new = {"key": cur, "corner": corner, "p": st[0].p.tolist(), "q": st[0].q.tolist(),
                        "time": time.strftime("%Y-%m-%d %H:%M:%S")}
-                msg = touch_sanity(touches, {**new, "p": st[0].p}, markers.SIZES[cur])
+                msg = touch_sanity(touches, {**new, "p": st[0].p}, markers.SIZES[cur], st[1] * 1000)
                 touches[:] = [t for t in touches if (t["key"], t["corner"]) != (cur, corner)] + [new]
                 save()
                 print(f"touch {cur} {rc.CORNER_NAMES[corner]}: ({st[0].p[0]:.4f}, {st[0].p[1]:+.4f}, {st[0].p[2]:.4f}) m  {msg}",
@@ -468,9 +467,10 @@ def run_arm(cam, arm, sess: Path) -> str:
         put(img, ARM_TEXT[part], (10, 140), WHITE, 0.5)
         if s is not None and part == "level":
             corr, sens = level_now(s.q - arm.offset)
-            ok = sens >= MIN_SENS
-            put(img, f"if both fingertips touch now: wrist zero {math.degrees(corr):+.1f} deg" if ok else
-                "fingers (almost) straight down: tilt them forward", (10, 166), GREEN if ok else RED, 0.5)
+            put(img, "fingers straight down: the roll cannot be read, tilt them forward" if sens < NO_SENS else
+                f"if both fingertips touch now: wrist zero {math.degrees(corr):+.1f} deg"
+                + ("  (fingers steep: a weak reading, tilt them forward)" if sens < MIN_SENS else ""),
+                (10, 166), RED if sens < NO_SENS else GREEN if sens >= MIN_SENS else YELLOW, 0.5)
         elif s is None:
             put(img, no_readings(arm), (10, 166), RED)
         put(img, "SPACE record   n / p next / previous part   u undo this part", (10, 192), GREY, 0.45)
@@ -503,22 +503,24 @@ def run_arm(cam, arm, sess: Path) -> str:
                 msg = no_readings(arm)
                 continue
             q, moved = r
-            if part == "level" and moved > STILL_DEG:
-                msg = f"moved {moved:.1f} deg while reading: let the fingertips settle, SPACE again"
-            elif part == "level":
+            if part == "level":
                 corr, sens = level_now(q)
-                if sens < MIN_SENS:
-                    msg = "the fingers point almost straight down: tilt them forward, SPACE again"
+                if sens < NO_SENS:
+                    msg = "the fingers point straight down: the roll cannot be read, tilt them forward, SPACE again"
                     continue
+                notes = ([f"moved {moved:.1f} deg while reading"] if moved > STILL_DEG else []) + \
+                        (["fingers steep: a weak reading"] if sens < MIN_SENS else [])
                 level.append(corr)
                 cfg.offset = cfg.offset.copy()
                 cfg.offset[R] = float(np.mean(level))
                 cfg.info["level_readings_deg"] = [round(math.degrees(v), 2) for v in level]
                 save("level")
                 spread = math.degrees(float(np.ptp(level)))
+                if spread > 3:
+                    notes.append("readings more than 3 deg apart - were both fingertips touching?")
                 msg = (f"wrist zero {math.degrees(cfg.offset[R]):+.1f} deg; "
                        + ("one more at another spot" if len(level) == 1 else f"readings agree within {spread:.1f} deg")
-                       + ("  CHECK: more than 3 deg apart - were both fingertips touching?" if spread > 3 else ""))
+                       + ("  CHECK: " + "; ".join(notes) + " (u = start the level again)" if notes else ""))
                 print(f"wrist zero {math.degrees(cfg.offset[R]):+.2f} deg ({len(level)} reading(s))", flush=True)
             else:
                 setattr(cfg, part, q)
@@ -549,8 +551,11 @@ def run_ball(cam, sess: Path) -> str:
         try:
             rig_map = rc.RigMap.load(rc.MAP_PATH)
             first = trk is None
-            trk = make_tracker(camera_calib(cam, locate_camera(cam, rig_map)), rig_map.plane, hsv=saved)
-            msg = "camera located"
+            res = locate_camera(cam, rig_map)
+            trk = make_tracker(camera_calib(cam, res), rig_map.plane, hsv=saved)
+            msg = ("camera located" + (f" - CHECK: {res.warnings[0]}" if res.warnings else ""))[:150]
+            for w in res.warnings:
+                print(f"camera: {w}", flush=True)
         except rc.CalibrationError as e:
             msg = f"cannot locate the camera: {e} (c = try again)"
             return

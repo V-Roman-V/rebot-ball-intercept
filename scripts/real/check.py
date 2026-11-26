@@ -66,8 +66,10 @@ def main() -> int:
 
     def locate():
         res = locate_camera(cam, rig_map)
-        print(f"camera located: {res.status}, {res.reproj_rms_px:.2f} px / {res.table_rms_mm:.1f} mm on markers {res.used}"
-              + (f"; {res.rejected} do not fit the map (moved?)" if res.rejected else ""), flush=True)
+        print(f"camera located: {res.status}, {res.reproj_rms_px:.2f} px / {res.table_rms_mm:.1f} mm on markers {res.used}",
+              flush=True)
+        for w in res.warnings:
+            print(f"  CHECK: {w}", flush=True)
         calib = camera_calib(cam, res)
         return calib, make_tracker(calib, plane)
 

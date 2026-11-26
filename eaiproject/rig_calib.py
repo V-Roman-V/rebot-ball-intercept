@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -48,7 +48,9 @@ SIGMA_TOUCH = 0.002               # fingertip resting on a marker corner (m)
 SIGMA_SWEEP = 0.0015              # fingertip height while sliding on the table (m)
 F_SCALE = 2.0                     # robust-loss scale, in sigmas
 
+# Quality rules: breaking one gives a warning, never a refusal. Errors are kept for what cannot be computed.
 MIN_VIEWS = 5
+WANT_MARKERS = 3                  # map markers in view for a sturdy camera pose (one is enough to place it)
 FAR_DIST = 0.50                   # m from the base: a marker beyond this counts as "far from the arm"
 MAX_SCALE = 0.005                 # touched layout vs the camera's: more apart = wrong marker size
 
@@ -583,6 +585,22 @@ class RigSolution:
     sweep_rejected: np.ndarray    # (n, 3) samples left out (lifted / gross)
 
 
+def _linked(obs: Observations, keys: list[str], touches: list[Touch]) -> tuple[list, list]:
+    """The views and markers a solve can place: from the markers with two or more touched points,
+    through the views that see a placed marker, to the markers those views see, and so on."""
+    placed = {k for k in keys if sum(t.key == k for t in touches) >= 2}
+    names: set[str] = set()
+    grow = bool(placed)
+    while grow:
+        grow = False
+        for v in obs.views:
+            if v.name not in names and any(k in placed for k in v.corners):
+                names.add(v.name)
+                placed |= {k for k in v.corners if k in keys}
+                grow = True
+    return [v for v in obs.views if v.name in names], [k for k in keys if k in placed]
+
+
 def _run(prob: _Problem, x0: np.ndarray) -> np.ndarray:
     return least_squares(prob.residuals, x0, loss="soft_l1", f_scale=F_SCALE, x_scale="jac", max_nfev=300).x
 
@@ -590,17 +608,30 @@ def _run(prob: _Problem, x0: np.ndarray) -> np.ndarray:
 def solve_rig(obs: Observations, far_dist: float = FAR_DIST) -> RigSolution:
     """Joint least squares for the table plane, every table marker's pose in the plane and one camera
     pose per view, in the arm's kinematic frame. Sweep samples (and touch heights) where the tip had
-    left the table are found from a first solution and dropped, then it is solved again. Raises
-    CalibrationError when the data cannot work."""
+    left the table are found from a first solution and dropped, then it is solved again. Data that
+    only weakens the map gives a warning (views and markers not linked to a touched marker are left
+    out); CalibrationError only when nothing can be placed in the arm frame."""
     warn: list[str] = []
     if not obs.views:
         raise CalibrationError("no camera views")
     keys = sorted({k for v in obs.views for k in v.corners if k in obs.sizes})
-    if len(keys) < 3:
-        raise CalibrationError(f"only {len(keys)} table marker(s) in the views ({keys}); the rig needs 4 or more")
+    if not keys:
+        raise CalibrationError("no table marker in the views")
     touches = [t for t in obs.touches if t.key in keys]
-    if len(touches) < 2:
-        raise CalibrationError("fewer than 2 touched points: nothing ties the markers to the arm frame")
+    views, linked = _linked(obs, keys, touches)
+    if not linked:
+        raise CalibrationError("no marker seen by the camera has two or more touched points: nothing ties the map "
+                               "to the arm frame. Touch 2 or more corners of one marker")
+    if len(views) < len(obs.views) or len(linked) < len(keys):
+        lost_v = [v.name for v in obs.views if v.name not in {u.name for u in views}]
+        lost_m = [k for k in keys if k not in linked]
+        warn.append(f"left out, not linked to a touched marker: views {lost_v}, markers {lost_m} (each view must show "
+                    "a touched marker, or share a marker with a view that does)")
+        obs, keys = replace(obs, views=views), linked
+        touches = [t for t in touches if t.key in keys]
+    if len(keys) < WANT_MARKERS:
+        warn.append(f"only {len(keys)} table marker(s) in the map ({keys}): the camera wants {WANT_MARKERS} or more in "
+                    "view for a sturdy pose")
     if len(obs.views) < MIN_VIEWS:
         warn.append(f"only {len(obs.views)} views (at least {MIN_VIEWS} wanted)")
     if len({t.key for t in touches}) < 2:
@@ -713,6 +744,7 @@ class Reloc:
     guided: list = field(default_factory=list)      # markers located by prediction (guided_corners)
     corners: dict = field(default_factory=dict)     # the corner pixels the pose was fitted to
     jitter_px: float = 0.0                          # largest corner movement while averaging (locate)
+    warnings: list = field(default_factory=list)    # what makes this pose weaker (it is still used)
 
     @property
     def status(self) -> str:
@@ -741,57 +773,59 @@ def marker_errors(rig_map: RigMap, K, dist, rvec, tvec, detections: dict) -> tup
     return px, mm
 
 
-def relocalize(rig_map: RigMap, K, dist, detections: dict, min_markers: int = 3, require_far: bool = True,
-               guided: dict | None = None) -> Reloc:
+def relocalize(rig_map: RigMap, K, dist, detections: dict, guided: dict | None = None) -> Reloc:
     """Camera pose in the arm frame from ONE PnP over all visible table-marker corners.
 
     `detections`: key -> (4, 2) corners, ideally averaged over ~30 frames (average corners, not
-    poses). Refuses (CalibrationError) with fewer than `min_markers` map markers, or when none of
-    them is far from the arm: near markers alone leave the pose loose across the table.
+    poses). One map marker places the camera. Fewer than WANT_MARKERS, or none far from the arm
+    (near markers alone leave the pose loose down the table), give a warning in `Reloc.warnings`.
     `guided`: extra corners from guided_corners() (markers located by prediction, not identified by
-    their bit pattern). They join the fit but do not count towards the two rules above.
+    their bit pattern). They join the fit but are not counted for those warnings.
+    CalibrationError only when no map marker is visible or the pose comes out mirrored.
     """
     seen = {k: np.asarray(c, float).reshape(4, 2) for k, c in detections.items() if k in rig_map.markers}
     extra = {k: np.asarray(c, float).reshape(4, 2) for k, c in (guided or {}).items() if k in rig_map.markers and k not in seen}
     unknown = sorted(k for k in detections if k not in rig_map.markers)
-
-    def check_ids(keys):
-        if len(keys) < min_markers:
-            raise CalibrationError(
-                f"only {len(keys)} map marker(s) visible ({sorted(keys)}); need at least {min_markers} of "
-                f"{sorted(rig_map.markers)}. Move the camera so it sees more of the table, check lighting / occlusion."
-                + (f" Markers not in the map: {unknown}." if unknown else ""))
-        if require_far and not any(rig_map.is_far(k) for k in keys):
-            far = sorted(k for k in rig_map.markers if rig_map.is_far(k))
-            raise CalibrationError(
-                f"no marker far from the arm is visible (seen: {sorted(keys)}; far markers, beyond "
-                f"{rig_map.far_dist:.2f} m: {far or 'none in the map'}). Aim the camera further down the table.")
+    ident = sorted(seen)
+    if not ident:
+        raise CalibrationError(f"no map marker visible (map: {sorted(rig_map.markers)}). Aim the camera at the table, "
+                               "check lighting / occlusion." + (f" Markers not in the map: {unknown}." if unknown else ""))
+    warn = []
+    if len(ident) < WANT_MARKERS:
+        warn.append(f"only {len(ident)} map marker(s) in view ({ident}): the camera pose is weaker; "
+                    f"{WANT_MARKERS} or more are better")
+    far_seen = any(rig_map.is_far(k) for k in ident)
+    if not far_seen:
+        far = sorted(k for k in rig_map.markers if rig_map.is_far(k))
+        warn.append(f"no marker far from the arm in view (beyond {rig_map.far_dist:.2f} m: {far or 'none in the map'}): "
+                    "the pose is loose far down the table; aim the camera further down")
 
     def fit(keys):
         rv, tv = _pnp(np.concatenate([rig_map.markers[k] for k in keys]), np.concatenate([seen[k] for k in keys]), K, dist)
         return rv, tv, marker_errors(rig_map, K, dist, rv, tv, {k: seen[k] for k in keys})
 
-    keys = sorted(seen)
-    check_ids(keys)
-    check = lambda keys: check_ids([k for k in keys if k not in extra])          # rules apply to identified markers
+    def can_drop(k):            # only while WANT_MARKERS identified ones, and a far one if one is seen, remain
+        rest = [j for j in ident if j != k]
+        return k in extra or (len(rest) >= WANT_MARKERS and (not far_seen or any(rig_map.is_far(j) for j in rest)))
+
     seen.update(extra)
     keys = sorted(seen)
     rvec, tvec, (px, mm) = fit(keys)
     rejected = []
-    if len([k for k in keys if k not in extra]) > min_markers and np.mean(list(px.values())) > OK_PX:
+    if len(ident) > WANT_MARKERS and np.mean(list(px.values())) > OK_PX:
         # A bad fit with markers to spare: does dropping ONE marker (moved on the table, misread) fix it?
+        # (A fit on one marker alone always looks good, hence the markers kept by can_drop.)
         best = None
         for k in keys:
-            rest = [j for j in keys if j != k]
-            try:
-                check(rest)
-            except CalibrationError:
+            if not can_drop(k):
                 continue
+            rest = [j for j in keys if j != k]
             cand = fit(rest)
             if best is None or np.mean(list(cand[2][0].values())) < np.mean(list(best[1][2][0].values())):
                 best = (k, cand, rest)
         if best is not None and np.mean(list(best[1][2][0].values())) < min(OK_PX, 0.4 * np.mean(list(px.values()))):
             (bad, (rvec, tvec, (px, mm)), keys), rejected = best, [best[0]]
+            warn.append(f"marker {bad} does not fit the map (moved on the table?): left out")
     C = camera_centre(rvec, tvec)
     o, _, _, n = plane_frame(rig_map.plane)
     if n @ (C - o) <= 0:
@@ -802,23 +836,24 @@ def relocalize(rig_map: RigMap, K, dist, detections: dict, min_markers: int = 3,
     e_mm = np.linalg.norm(backproject_to_plane(K, dist, rvec, tvec, rig_map.plane, allc)
                           - np.concatenate([rig_map.markers[k] for k in keys]), axis=1) * 1000
     return Reloc(rvec, tvec, keys, rejected, px, mm, float(np.sqrt(np.mean(e_px ** 2))),
-                 float(np.sqrt(np.mean(e_mm ** 2))), C, sorted(k for k in keys if k in extra), {k: seen[k] for k in keys})
+                 float(np.sqrt(np.mean(e_mm ** 2))), C, sorted(k for k in keys if k in extra), {k: seen[k] for k in keys},
+                 warnings=warn)
 
 
-def locate(rig_map: RigMap, K, dist, images: list, min_markers: int = 3, require_far: bool = True) -> Reloc:
+def locate(rig_map: RigMap, K, dist, images: list) -> Reloc:
     """Camera pose from a short burst of frames (BGR) of a camera that stands still.
 
     Corners are averaged over the frames (corners, not poses), one PnP gives a first pose from the
     markers the detector read, the remaining map markers are then looked for where that pose
     predicts them, and the PnP is repeated with everything. Raises CalibrationError when it cannot
-    be trusted (see relocalize) or when the pose would break the ball-plane convention.
+    be computed (see relocalize) or when the pose would break the ball-plane convention.
     """
     mean, jitter = average_corners([_markers.detect(im) for im in images])
-    res = relocalize(rig_map, K, dist, mean, min_markers, require_far)
+    res = relocalize(rig_map, K, dist, mean)
     grays = [cv2.cvtColor(im, cv2.COLOR_BGR2GRAY) for im in images]
     extra, j2 = average_corners([guided_corners(g, rig_map, K, dist, res.rvec, res.tvec, have=mean) for g in grays])
     if extra:
-        res = relocalize(rig_map, K, dist, mean, min_markers, require_far, guided=extra)
+        res = relocalize(rig_map, K, dist, mean, guided=extra)
     res.jitter_px = max([0.0, *jitter.values(), *j2.values()])
     h, w = grays[0].shape
     pixel_to_ball_xy(K, dist, res.rvec, res.tvec, rig_map.plane, [[w / 2, h / 2]])       # sign convention check

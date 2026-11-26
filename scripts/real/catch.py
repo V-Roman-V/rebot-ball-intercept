@@ -56,6 +56,8 @@ def main() -> int:
         cam.close()
         return 1
     print(f"camera located: {res.status}, {res.reproj_rms_px:.2f} px on markers {res.used}", flush=True)
+    for w in res.warnings:
+        print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
     trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane), HostClock()
     gx = planner.gate_x

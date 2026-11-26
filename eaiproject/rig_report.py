@@ -89,7 +89,7 @@ def reproj_images(sol: rc.RigSolution, obs: rc.Observations, sess: Path, out: Pa
     n = 0
     for v in obs.views:
         f = sess / f"{v.name}.png"
-        if not f.exists():
+        if not f.exists() or v.name not in sol.cams:             # not in the solve: not linked to a touched marker
             continue
         img = cv2.imread(str(f))
         rv, tv = sol.cams[v.name]
