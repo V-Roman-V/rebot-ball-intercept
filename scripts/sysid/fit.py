@@ -6,6 +6,7 @@ command delay. Validation on the held-out multisine. Guide: docs/sysid.md.
 Usage
     .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run>                  # full fit (~10-30 min, all cores)
     .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run> --gens 60        # quick look
+    .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run1> outputs/sysid/<run2>      # several runs in one fit
     .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run> --eval <sim_params.json>   # score given params
 
 Output: <run>/fit_<time>/  sim_params.json (the artifact)  fit_report.txt  fit_*.png
@@ -24,7 +25,8 @@ from eaiproject.sysid.fit import fit  # noqa: E402
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("run", help="run directory from collect.py (contains log.npz, meta.json)")
+    ap.add_argument("run", nargs="+", help="run directory from collect.py (log.npz, meta.json); several are fitted "
+                                           "together, the output goes to the first")
     ap.add_argument("--gens", type=int, default=300, help="max CMA-ES generations")
     ap.add_argument("--pop", type=int, default=32, help="population size")
     ap.add_argument("--threads", type=int, default=None, help="rollout threads (default: all cores)")
@@ -35,7 +37,7 @@ def main() -> int:
     ap.add_argument("--eval", default=None, metavar="PARAMS_JSON", help="only evaluate these parameters")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    fit(a.run, a.out, gens=a.gens, pop=a.pop, threads=a.threads, sigma=a.sigma, seed=a.seed,
+    fit(a.run if len(a.run) > 1 else a.run[0], a.out, gens=a.gens, pop=a.pop, threads=a.threads, sigma=a.sigma, seed=a.seed,
         allow_partial=a.allow_partial, patience=a.patience, eval_params=a.eval)
     return 0
 

@@ -24,6 +24,21 @@ from .model import MOTOR_IDS, MOTOR_TORQUE_MAX, N, ArmModel, SimParams, mit_ctrl
 RUN_MODE_MIT = 0
 
 
+def rig_offset(raw, cfg, yaw_deg: float = 0.0) -> np.ndarray:
+    """The offset (motor reading = model angle + offset, rad) of the arm as the rig is calibrated, from
+    the motors' readings `raw` now. It replaces --joint-offset typed by hand.
+
+    cfg (arm.ArmConfig): the joint's angle inside its limits, whatever turn the motor counts, plus
+    the wrist zero. yaw_deg (the table map's base turn): this model has its table in front of joint
+    1's zero, so the real base's turn is taken out of joint 1; the plan check then sees the table
+    where it is. Joint 6: the two-finger gripper is the same rolled half a turn, so it takes the
+    half turn nearest the model's zero, where the plan has room on both sides."""
+    q = cfg.to_model(raw)
+    q[0] -= np.radians(yaw_deg)           # joint 1's axis points down: facing along the arm's +y is -90 deg
+    q[5] -= np.pi * np.round(q[5] / np.pi)
+    return np.asarray(raw, float) - q
+
+
 @dataclass
 class Feedback:
     q: np.ndarray       # rad          NaN where a joint did not answer this cycle
@@ -65,6 +80,11 @@ class RealArm:
                 return
             if rem > 0.002:
                 time.sleep(rem - 0.0015)      # OS sleep, then spin the last ~1.5 ms for an even period
+
+    def raw_positions(self) -> np.ndarray | None:
+        """The six motors' own position readings (rad), or None if one does not answer."""
+        q = [self.rs.read_param_f32(mid, P_MECHPOS) for mid in MOTOR_IDS]
+        return None if any(v is None for v in q) else np.array(q, float)
 
     def read_status(self) -> dict:
         rs = self.rs

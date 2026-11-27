@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .robstride import ARM_IDS, GRIPPER_ID, P_MECHPOS, P_RUN_MODE, TARGET_MAX, TARGET_MIN
+from .robstride import ARM_IDS, GRIPPER_ID, P_LIMIT_TORQUE, P_MECHPOS, P_RUN_MODE, TARGET_MAX, TARGET_MIN
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "outputs" / "calibration" / "arm.json"
@@ -54,16 +54,16 @@ GRIP_OPEN = 4.5                           # motor rad: gripper opened for the ca
 GRIP_SPEED, GRIP_CUR = 2.0, 2.0           # rad/s, A: the gripper's firmware speed limit and current cap
 
 # MIT control (Arm(control="mit")): the motors' MIT mode with the simulation's PD gains and the model's
-# gravity as feed-forward, as in BallInterceptEnv and the system-identification run (scripts/sysid), so
-# a fitted sim_params.json describes the arm under this controller. MIT mode has no firmware speed
-# limit: Arm.command() limits the step to `speed` (rad/s) as a backstop, scaling the whole pose. The
-# torque cap is the motors' limit_torque, written for the run and restored on release.
+# gravity as feed-forward. These gains and caps are the single definition for the catch, the simulation
+# and the system identification (eaiproject/sysid imports them), so a fitted sim_params.json describes
+# the arm under this controller. MIT mode has no firmware speed limit: Arm.command() limits the step
+# to `speed` (rad/s) as a backstop, scaling the whole pose. The torque cap is the motors'
+# limit_torque (robstride.P_LIMIT_TORQUE), written for the run and restored on release.
 RUN_MODE_MIT = 0
-P_LIMIT_TORQUE = 0x700B                   # Nm (checked on this arm's firmware by the sysid run, 27 Nov)
-MIT_KP = np.array([80.0, 100.0, 100.0, 35.0, 25.0, 18.0])
+MIT_KP = np.array([80.0, 100.0, 100.0, 35.0, 25.0, 18.0])    # Seeed rebotarm_mujoco_rs gains, used by our sim
 MIT_KD = np.array([8.0, 10.0, 10.0, 4.0, 3.0, 2.5])
-TORQUE_CAP = np.array([20.0, 20.0, 20.0, 7.0, 7.0, 7.0])     # Nm, as in the sysid run
-MOTOR_TORQUE_MAX = np.array([36.0, 36.0, 36.0, 14.0, 14.0, 14.0])
+TORQUE_CAP = np.array([20.0, 20.0, 20.0, 7.0, 7.0, 7.0])     # Nm, written to limit_torque (RAM) for a run
+MOTOR_TORQUE_MAX = np.array([36.0, 36.0, 36.0, 14.0, 14.0, 14.0])   # RS06 x3, RS00 x3 (firmware limit_torque)
 FF_RAMP = 1.0                             # s, gravity feed-forward ramps in after power-on
 # While the target stands still the damping gain is lowered: the motor multiplies kd by its own velocity
 # reading, which is noisy at rest (0.03 .. 0.09 rad/s -> 0.5 .. 0.85 N m of torque jitter on joints 1-3,

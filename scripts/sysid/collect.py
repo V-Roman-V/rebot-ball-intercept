@@ -43,6 +43,10 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=200.0, help="command rate, Hz")
     ap.add_argument("--fmax", type=float, default=4.0, help="highest chirp frequency, Hz")
     ap.add_argument("--scale", type=float, default=1.0, help="excitation amplitude scale (0.2 .. 1.2)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="scale of the joint speed and acceleration the excitation reaches, 0.5 .. 2 (1 = up to 1.0 / "
+                         "0.8 / 0.8 / 1.5 / 1.5 / 2.0 rad/s on joints 1-6). Faster motion needs more torque: the plan "
+                         "check says if --torque-cap must be raised")
     ap.add_argument("--only", nargs="+", choices=EXCITE_NAMES, help="run only these excitation segments")
     ap.add_argument("--torque-cap", type=float, nargs=6, default=TORQUE_CAP_DEFAULT.tolist(),
                     help="limit_torque written to the motors for the run, Nm (joints 1-6)")
@@ -52,16 +56,15 @@ def main() -> int:
     ap.add_argument("--inject", default="none", choices=["none", "track", "lost"],
                     help="sim: inject a disturbance (track: push on joint 2) or lost feedback at t = 100 s")
     ap.add_argument("--joint-offset", action="append", default=[], metavar="J=DEG",
-                    help="real arm: motor joint J reads DEG in the model's zero pose (repeatable), e.g. 6=333.64")
+                    help="real arm: motor joint J reads DEG in the model's zero pose (repeatable). Default: from "
+                         "the rig's calibration (wrist zero, base turn, the turn each motor counts)")
     ap.add_argument("--out", default=None, help="output directory (default outputs/sysid/<time>)")
     args = ap.parse_args()
     args.scale = min(max(args.scale, 0.2), 1.2)
+    args.speed = min(max(args.speed, 0.5), 2.0)      # x2 stays below the run's speed abort (Safety.vel_max)
     args.fmax = min(max(args.fmax, 0.5), 8.0)
     kp, kd = KP_DEFAULT.copy(), KD_DEFAULT.copy()
     offset = np.zeros(6)
-    for item in args.joint_offset:
-        j, deg = item.split("=")
-        offset[int(j) - 1] = np.radians(float(deg))
     cap = MOTOR_TORQUE_MAX.copy() if args.no_torque_cap else np.minimum(np.array(args.torque_cap), MOTOR_TORQUE_MAX)
 
     arm = ArmModel()
@@ -69,7 +72,7 @@ def main() -> int:
         from eaiproject.sysid.arm_io import SIM_TRUTH, SimArm
         io = SimArm(arm, args.sim_start, kp, kd, cap, inject=args.inject)
     else:
-        from eaiproject.sysid.arm_io import RealArm
+        from eaiproject.sysid.arm_io import RealArm, rig_offset
         try:
             io = RealArm(None if args.can == "auto" else args.can, args.channel, allow_motion=not args.dry_run,
                         offset=offset)
@@ -79,6 +82,23 @@ def main() -> int:
                   "  Linux: sudo ip link set can0 up type can bitrate 1000000")
             return 2
     print(f"CAN link: {io.link}")
+    if not args.sim:
+        # joint offsets: from the rig's calibration, then any typed with --joint-offset
+        raw, note = io.raw_positions(), "no joint answered: no calibration offsets"
+        if raw is not None:
+            from eaiproject import arm as arm_mod
+            from eaiproject import rig_calib
+            cfg = arm_mod.load()
+            yaw = rig_calib.RigMap.load(rig_calib.MAP_PATH).frame.yaw_deg if rig_calib.MAP_PATH.exists() else 0.0
+            offset = rig_offset(raw, cfg, yaw)
+            note = (f"wrist zero {cfg.info.get('level_time', 'not measured')}, base turn {yaw:+.0f} deg"
+                    + ("" if rig_calib.MAP_PATH.exists() else " (no table map)"))
+        for item in args.joint_offset:
+            j, deg = item.split("=")
+            offset[int(j) - 1] = np.radians(float(deg))
+        io.offset = offset
+        print(f"joint offsets (deg): {np.degrees(offset).round(2).tolist()}  ({note}"
+              + (f"; typed: {', '.join(args.joint_offset)}" if args.joint_offset else "") + ")")
 
     try:
         # ------------------------------------------------ 1. preflight (nothing enabled)
@@ -95,7 +115,7 @@ def main() -> int:
         print(f"preflight OK. start pose (deg): {np.round(np.degrees(q_start), 1).tolist()}")
 
         # ------------------------------------------------ 2. plan + offline check in the model
-        segs = build_plan(q_start, fmax=args.fmax, scale=args.scale, only=args.only)
+        segs = build_plan(q_start, fmax=args.fmax, scale=args.scale, only=args.only, speed=args.speed)
         print(f"\nplan check in MuJoCo (nominal model, {args.rate:.0f} Hz) ...")
         chk = check_plan(arm, segs, kp, kd, cap, args.rate)
         print(chk.table(cap))

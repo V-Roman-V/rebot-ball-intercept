@@ -12,6 +12,10 @@
     ./rig track               ball tracking and the planned arm motion; the arm is NOT powered
     ./rig move                POWERED: the jaw passes along the intercept line at 60 / 35 / 20 mm
     ./rig catch               POWERED: the jaw follows the ball
+    ./rig sysid               POWERED: system identification run, chirps on all six joints (--dry-run first;
+                              --sim rehearses it without hardware; docs/sysid.md)
+    ./rig sysid-fit <run> [<run> ...]
+                              fit the simulation's actuator parameters to one or more sysid runs (no hardware)
     ./rig test                unit tests, no hardware
 
 Options after the task go to its script, e.g. ./rig calibrate --solve, ./rig move --heights 40,
@@ -46,6 +50,8 @@ TASKS = {                         # task -> (script, needs the camera)
     "track": ("track.py", True),
     "move": ("move.py", False),
     "catch": ("catch.py", True),
+    "sysid": ("../sysid/collect.py", False),
+    "sysid-fit": ("../sysid/fit.py", False),
 }
 
 

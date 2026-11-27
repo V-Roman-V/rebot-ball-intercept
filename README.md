@@ -23,6 +23,7 @@ Intel RealSense D435i.
 | Real camera: 60 fps stream, located from table markers mapped in the arm's frame | ✅ 0.6 px, touches 1.7 mm |
 | Real tracking in shadow mode (arm unpowered) | ✅ tested on the rig |
 | Powered: jaw along the intercept line (all joints, motor position mode) | ✅ tested on the rig |
+| Actuator system identification (chirps on the real arm, CMA-ES fit of the sim's joint parameters) | ✅ first run and fit, 27 Nov 2026: joint error on held-out motion 1.7° → 0.7°; more data planned |
 | Powered: interception of a rolled ball (MIT mode: sim PD gains + gravity feed-forward) | ✅ first real catches, 27 Nov 2026: the jaw within its ±28 mm catch width for 23 of 26 rolls inside its reach; rolls faster than 0.6 m/s are still missed |
 
 ## Repository layout
@@ -83,6 +84,7 @@ is in [docs/real_rig.md](docs/real_rig.md).
 ./rig track              # ball tracking and the planned motion, arm NOT powered
 ./rig move               # POWERED: the jaw along the intercept line at 60 / 35 / 20 mm
 ./rig catch              # POWERED: the jaw follows the ball
+./rig sysid              # POWERED: system identification run (docs/sysid.md); ./rig sysid-fit <run> fits it
 ```
 
 The table map is committed (`config/rig_map.json`). Daily values, logs and camera frames are

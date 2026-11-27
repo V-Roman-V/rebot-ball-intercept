@@ -33,10 +33,14 @@ and noise, and timing jitter. The fit report prints the true values next to the 
 | step | what | time |
 |---|---|---|
 | 0 | Arm in its **rest pose**, jaw closed, 0.7 m clear around it. 48 V on, PCAN-USB plugged in. One person at the power switch. | 5 min |
-| 1 | `.venv/bin/python scripts/sysid/collect.py --dry-run`: reads everything and checks the plan in the model. Nothing is powered. | 10 s |
-| 2 | `.venv/bin/python scripts/sysid/collect.py`, then type `yes`. | ~4 min |
+| 1 | `./rig sysid --dry-run` (= `.venv/bin/python scripts/sysid/collect.py --dry-run`): reads everything and checks the plan in the model. Nothing is powered. | 10 s |
+| 2 | `./rig sysid`, then type `yes`. | ~4 min |
 | 3 | The script ends with `DATA OK`. Copy `outputs/sysid/<run>/` somewhere safe. | |
-| 4 | `.venv/bin/python scripts/sysid/fit.py outputs/sysid/<run>` (any laptop, no hardware) | 15-40 min |
+| 4 | `./rig sysid-fit outputs/sysid/<run>` (any laptop, no hardware) | 15-40 min |
+
+The joint offsets (wrist zero, the base's turn on the table, the turn each motor counts) come from
+the rig's calibration: do `./rig calibrate` step 4 first on the day. See
+[scripts/sysid/README.md](../scripts/sysid/README.md).
 
 The CAN backend is chosen automatically: `pcan` on macOS (see [real_rig.md](real_rig.md)) and
 `socketcan` on Linux. On Linux, bring the link up once per boot with
@@ -83,7 +87,7 @@ acceleration, so it shrinks at high frequency (about 1° at 4 Hz for joints 2-3)
 |---|---|
 | `No arm motor answered` | 48 V off or CAN cable not in the arm |
 | `Cannot open the CAN adapter` | adapter unplugged; macOS: libPCBUSB missing; Linux: `can0` not up |
-| `joint N reads ... outside the model range` | zero offset lost, run `scripts/real/joint_check.py` |
+| `joint N reads ... outside the model range` | the arm is not in its rest pose, or the wrist zero is not today's: `./rig calibrate --step arm`; `./rig arm` shows the joints |
 | `joint N draws ... A` | another script still has the motor enabled; close it |
 | `limit_torque reads ..., not a plausible torque limit` | unexpected firmware parameter map; rerun with `--no-torque-cap` only if you are sure |
 | `PLAN CHECK FAILED: predicted torque` | lower `--scale` (e.g. 0.7) or `--fmax` |
@@ -97,9 +101,13 @@ acceleration, so it shrinks at high frequency (about 1° at 4 Hz for joints 2-3)
   joints are removed) and the meshes are dropped. Masses and inertias are unchanged.
 - MIT law in MuJoCo: an affine actuator, `force = kp (ctrl - q) - kd qd`, with
   `ctrl = q_cmd + bias + tau_ff / kp`, clamped to the run's torque cap and delayed by `delay`.
-- Search box (`model.BOUNDS`): armature 0-0.2 / 0-0.05 kg m², damping 0-5 / 0-3 N m s/rad,
-  friction 0-3 / 0-1 N m (RS06 / RS00), bias ±0.05 rad, delay 0-50 ms. The report flags any
-  parameter that ends at a box edge; widen the box if one does.
+- Search box (`model.BOUNDS`): armature 0-0.6 / 0-0.15 kg m², damping 0-5 / 0-3 N m s/rad,
+  friction 0-3 / 0-2 N m (RS06 / RS00), bias ±0.05 rad, delay 0-100 ms. The report flags any
+  parameter that ends at a box edge; widen the box if one does (done once, after the first real
+  fit of 27 Nov 2026 ended at the edge for every armature, the delay and joint 6's friction).
+- Several runs can be fitted together (`fit.py <run1> <run2> ...`): windows are named
+  `<segment>_<run>`, each run is replayed under its own torque cap, and the output goes to the
+  first run's folder.
 - Output in `<run>/fit_<time>/`:
   - `sim_params.json`, the artifact
   - `fit_report.txt`, RMS error per joint (nominal vs fitted, train and val) and a parameter table

@@ -81,6 +81,7 @@ mkdir -p ~/lib && cp PCBUSB/libPCBUSB.0.13.dylib ~/lib/ && ln -sf ~/lib/libPCBUS
 ./rig track              # ball tracking and the planned motion; the arm is NOT powered
 ./rig move               # POWERED: the jaw along the intercept line at 60 / 35 / 20 mm
 ./rig catch              # POWERED: the jaw follows the ball
+./rig sysid              # POWERED: system identification run; ./rig sysid-fit <run> fits it (docs/sysid.md)
 ./rig test               # unit tests
 ```
 

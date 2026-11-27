@@ -144,7 +144,8 @@ def main() -> int:
     out = args.out or str(ROOT / "outputs/sysid" / (time.strftime("%Y%m%d_%H%M%S") + "_fakecan"))
     if "--only" not in extra:
         extra = ["--only", "chirp_A_small"] + extra
-    sys.argv = ["collect.py", "--yes", "--out", out] + extra
+    zero = [x for j in range(1, 7) for x in ("--joint-offset", f"{j}=0")]   # the emulated motors read model angles: no rig calibration
+    sys.argv = ["collect.py", "--yes", "--out", out] + zero + extra
     spec = importlib.util.spec_from_file_location("sysid_collect_cli", ROOT / "scripts/sysid/collect.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)

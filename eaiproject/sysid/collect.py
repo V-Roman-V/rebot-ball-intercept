@@ -290,8 +290,9 @@ def preflight(status: dict, arm: ArmModel, sim: bool) -> tuple[np.ndarray | None
         lo, hi = arm.range[j]
         if not (lo - 0.1 <= s["pos"] <= hi + 0.1):
             problems.append(f"joint{mid} reads {math.degrees(s['pos']):+.1f} deg, outside the model range "
-                            f"[{math.degrees(lo):+.1f}, {math.degrees(hi):+.1f}] -> zero offset? run joint_check.py, "
-                            f"then pass --joint-offset {mid}=<reading in the zero pose, deg>")
+                            f"[{math.degrees(lo):+.1f}, {math.degrees(hi):+.1f}] -> is the arm in its rest pose, and "
+                            f"the wrist zero today's (./rig calibrate --step arm)? ./rig arm shows the joints; "
+                            f"--joint-offset {mid}=<reading in the zero pose, deg> sets it by hand")
     return (None if np.isnan(q).any() else q), problems, warns
 
 
@@ -319,7 +320,8 @@ def git_hash() -> str:
 def base_meta(args, sim: bool, link: str) -> dict:
     return {"created": time.strftime("%Y-%m-%d %H:%M:%S"), "mode": "sim" if sim else "real", "link": link,
             "host": platform.platform(), "python": sys.version.split()[0], "git": git_hash(),
-            "argv": sys.argv, "rate_hz": args.rate, "fmax_hz": args.fmax, "scale": args.scale}
+            "argv": sys.argv, "rate_hz": args.rate, "fmax_hz": args.fmax, "scale": args.scale,
+            "speed": getattr(args, "speed", 1.0)}
 
 
 def run_plan(runner: Runner, segs: list[Segment], q_start: np.ndarray, checkpoint) -> str | None:

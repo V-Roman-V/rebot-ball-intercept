@@ -20,25 +20,27 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from ..arm import MIT_KD as KD_DEFAULT, MIT_KP as KP_DEFAULT, MOTOR_TORQUE_MAX, TORQUE_CAP as TORQUE_CAP_DEFAULT  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[2]
 SYSID_SCENE = ROOT / "assets/rebot_b601_rs/mjcf/sysid_scene.xml"
 
 N = 6
 ARM_JOINTS = [f"joint{i}" for i in range(1, N + 1)]
 MOTOR_IDS = tuple(range(1, N + 1))
-KP_DEFAULT = np.array([80.0, 100.0, 100.0, 35.0, 25.0, 18.0])   # Seeed rebotarm_mujoco_rs gains, used by our sim
-KD_DEFAULT = np.array([8.0, 10.0, 10.0, 4.0, 3.0, 2.5])
-MOTOR_TORQUE_MAX = np.array([36.0, 36.0, 36.0, 14.0, 14.0, 14.0])  # RS06 x3, RS00 x3 (firmware limit_torque)
-TORQUE_CAP_DEFAULT = np.array([20.0, 20.0, 20.0, 7.0, 7.0, 7.0])    # written to limit_torque (RAM) for the run
+# KP_DEFAULT, KD_DEFAULT, TORQUE_CAP_DEFAULT, MOTOR_TORQUE_MAX: the arm controller's own (eaiproject/arm.py),
+# so the identification always runs under the gains the catch uses.
 
 # Search box per parameter (RS06 joints 1-3, RS00 joints 4-6). Normalised to [-1, 1] for CMA-ES.
+# Widened after the first real fit (27 Nov 2026), where every armature (then <= 0.20 / 0.05), the delay
+# (<= 50 ms) and joint 6's friction (<= 1.0) ended at the edge of the box.
 BOUNDS = {
-    "armature":     (np.zeros(N), np.array([0.20, 0.20, 0.20, 0.05, 0.05, 0.05])),     # kg m^2
+    "armature":     (np.zeros(N), np.array([0.60, 0.60, 0.60, 0.15, 0.15, 0.15])),     # kg m^2
     "damping":      (np.zeros(N), np.array([5.0, 5.0, 5.0, 3.0, 3.0, 3.0])),           # N m s / rad
-    "frictionloss": (np.zeros(N), np.array([3.0, 3.0, 3.0, 1.0, 1.0, 1.0])),           # N m
+    "frictionloss": (np.zeros(N), np.array([3.0, 3.0, 3.0, 2.0, 2.0, 2.0])),           # N m
     "bias":         (np.full(N, -0.05), np.full(N, 0.05)),                              # rad
 }
-DELAY_BOUNDS = (0.0, 0.05)                                                               # s
+DELAY_BOUNDS = (0.0, 0.10)                                                               # s
 PER_JOINT = ("armature", "damping", "frictionloss", "bias")
 
 

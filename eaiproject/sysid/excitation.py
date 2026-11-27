@@ -67,9 +67,10 @@ def move(name: str, q0, q1, v_peak: float = MOVE_SPEED) -> Segment:
     return Segment(name, "move", "", T, q, q1)
 
 
-def amplitude(f, scale: float) -> np.ndarray:
+def amplitude(f, scale: float, speed: float = 1.0) -> np.ndarray:
+    """Chirp amplitude at frequency f: `scale` x A_MAX, kept below `speed` x V_MAX and `speed` x ACC_MAX."""
     w = 2 * np.pi * np.maximum(f, 1e-6)
-    return np.minimum(np.minimum(A_MAX * scale, V_MAX / w), ACC_MAX / w**2)
+    return np.minimum(np.minimum(A_MAX * scale, speed * V_MAX / w), speed * ACC_MAX / w**2)
 
 
 def _window(t: float, T: float, fade: float) -> float:
@@ -77,7 +78,7 @@ def _window(t: float, T: float, fade: float) -> float:
 
 
 def chirp(name: str, role: str, center, T: float = 30.0, f0: float = 0.1, f1: float = 4.0, scale: float = 1.0,
-          pre: float = 1.5, post: float = 1.0, fade: float = 1.5) -> Segment:
+          pre: float = 1.5, post: float = 1.0, fade: float = 1.5, speed: float = 1.0) -> Segment:
     """Exponential sweep f(t) = f0 (f1/f0)^(t/T), all joints at once, with holds before and after."""
     c = np.array(center, float)
     k = f1 / f0
@@ -88,17 +89,18 @@ def chirp(name: str, role: str, center, T: float = 30.0, f0: float = 0.1, f1: fl
             return c
         f = f0 * k ** (s / T)
         ph = 2 * np.pi * f0 * T / math.log(k) * (k ** (s / T) - 1)
-        return c + SIGNS * amplitude(f, scale) * math.sin(ph) * _window(s, T, fade)
+        return c + SIGNS * amplitude(f, scale, speed) * math.sin(ph) * _window(s, T, fade)
     return Segment(name, "excite", role, pre + T + post, q, c)
 
 
 def multisine(name: str, role: str, center, T: float = 25.0, f_lo: float = 0.2, f_hi: float = 4.0, n: int = 12,
-              scale: float = 1.0, seed: int = 7, pre: float = 1.5, post: float = 1.0, fade: float = 1.5) -> Segment:
+              scale: float = 1.0, seed: int = 7, pre: float = 1.5, post: float = 1.0, fade: float = 1.5,
+              speed: float = 1.0) -> Segment:
     """Sum of n log-spaced sines with random phases per joint (a signal the fit never sees)."""
     c = np.array(center, float)
     rng = np.random.default_rng(seed)
     freqs = np.geomspace(f_lo, f_hi, n)
-    amps = np.stack([amplitude(f, scale) for f in freqs]) * (1.6 / n)       # (n, 6); the plan check bounds it
+    amps = np.stack([amplitude(f, scale, speed) for f in freqs]) * (1.6 / n)       # (n, 6); the plan check bounds it
     phases = rng.uniform(0, 2 * np.pi, (n, N))
 
     def q(t: float) -> np.ndarray:
@@ -110,17 +112,19 @@ def multisine(name: str, role: str, center, T: float = 25.0, f_lo: float = 0.2, 
     return Segment(name, "excite", role, pre + T + post, q, c)
 
 
-def build_plan(q_start, fmax: float = 4.0, scale: float = 1.0, only: list[str] | None = None) -> list[Segment]:
+def build_plan(q_start, fmax: float = 4.0, scale: float = 1.0, only: list[str] | None = None,
+               speed: float = 1.0) -> list[Segment]:
+    """`speed` scales the joint speed and acceleration the excitation may reach (V_MAX, ACC_MAX)."""
     q_start = np.array(q_start, float)
     want = lambda n: only is None or n in only
     segs = [hold("enable_hold", q_start, 4.0, ff=lambda t: _ramp(t, 0.5, 2.5))]
     q = q_start
     a_group = [s for s in (
-        chirp("chirp_A_large", "train", POSE_A, f1=fmax, scale=scale),
-        chirp("chirp_A_small", "train", POSE_A, f1=fmax, scale=0.35 * scale),
-        multisine("multisine_A", "val", POSE_A, f_hi=fmax, scale=scale),
+        chirp("chirp_A_large", "train", POSE_A, f1=fmax, scale=scale, speed=speed),
+        chirp("chirp_A_small", "train", POSE_A, f1=fmax, scale=0.35 * scale, speed=speed),
+        multisine("multisine_A", "val", POSE_A, f_hi=fmax, scale=scale, speed=speed),
     ) if want(s.name)]
-    b_group = [s for s in (chirp("chirp_B", "train", POSE_B, f1=fmax, scale=0.7 * scale),) if want(s.name)]
+    b_group = [s for s in (chirp("chirp_B", "train", POSE_B, f1=fmax, scale=0.7 * scale, speed=speed),) if want(s.name)]
     for pose, tag, group in ((POSE_A, "A", a_group), (POSE_B, "B", b_group)):
         if not group:
             continue

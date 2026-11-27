@@ -18,7 +18,9 @@ A one-minute walkthrough on simulated data: [docs/media/sysid_demo.mp4](../../do
 | `fake_can_test.py` | no | the **real** CAN code path against emulated motors | ~60 s |
 | `collect.py --dry-run` | yes, unpowered | preflight reads + plan check, nothing enabled | ~10 s |
 | `collect.py` | yes, powered | the real data collection | ~4 min |
-| `fit.py <run>` | no | CMA-ES fit, writes `sim_params.json` | 15-40 min |
+| `fit.py <run> [<run> ...]` | no | CMA-ES fit, writes `sim_params.json` | 15-40 min |
+
+On the rig the same two are `./rig sysid [options]` and `./rig sysid-fit <run> [<run> ...]`.
 
 ## 0. Install
 
@@ -66,10 +68,18 @@ Before you start:
 .venv/bin/python scripts/sysid/collect.py              # type 'yes'; at the end press Enter to disable
 ```
 
-- **Our arm: joint 6 zero offset.** In the zero pose the joint-6 motor reads +333.64 deg (checked
-  25 Nov 2026), so add `--joint-offset 6=333.64` to both commands. The offset is applied to every
-  read and command and saved in `meta.json`.
-- **Plug the PCAN-USB straight into the laptop.** Behind a USB-C hub it kept disconnecting.
+- **Joint offsets come from the rig's calibration.** Do today's arm step first
+  (`./rig calibrate`, step 4: the wrist zero changes when the gripper is remounted). The run then
+  takes its offsets from `outputs/calibration/arm.json` and the table map, and prints them:
+  the wrist zero for joint 6, the base's turn on the table for joint 1 (the model has its table in
+  front of joint 1's zero, ours is turned 90° to the right), and the turn each motor counts (joint 1
+  reads 267° at rest). On 27 Nov 2026 that gave 270° and 212.8°, the values typed by hand that day.
+  `--joint-offset J=DEG` still sets one by hand. The offsets are applied to every read and command
+  and saved in `meta.json`.
+- **Switch the arm's 48 V off and on before the run** if a position-mode task (`./rig move`) ran
+  since power-on: its speed and current limits stay in the motors' RAM.
+- **Plug the PCAN-USB straight into the laptop** if you can. Behind a USB-C hub it kept
+  disconnecting on one laptop; on our Mac the hub worked (27 Nov 2026).
 - **CAN backend.** It is chosen automatically: `pcan` on macOS, `socketcan` on Linux. On Linux,
   bring the link up once per boot: `sudo ip link set can0 up type can bitrate 1000000`.
 - **Stopping.** `Ctrl+C` stops safely: the arm moves slowly back to rest, then the motors are
@@ -80,14 +90,31 @@ Before you start:
 - **If the plan check or the run fails,** the message says why. The usual fix is a smaller
   amplitude, `--scale 0.6`. See the troubleshooting table in [docs/sysid.md](../../docs/sysid.md).
 
-Useful options: `--scale` (amplitude), `--fmax` (highest chirp frequency, default 4 Hz), `--rate`
-(default 200 Hz), `--only <segments>`, `--torque-cap` / `--no-torque-cap`.
+Useful options: `--scale` (amplitude), `--speed` (joint speed and acceleration the excitation
+reaches, up to 2x), `--fmax` (highest chirp frequency, default 4 Hz), `--rate` (default 200 Hz),
+`--only <segments>`, `--torque-cap` / `--no-torque-cap`.
+
+**More data for a better fit.** One run excites the joints up to 1.0 / 0.8 / 0.8 / 1.5 / 1.5 /
+2.0 rad/s, while the catch moves them at up to 3 rad/s, and the first real fit described large fast
+motion better than small slow motion. Record several runs and fit them together:
+
+```bash
+./rig sysid                          # the standard run
+./rig sysid --scale 0.6              # smaller motion
+./rig sysid --speed 2                # twice the joint speed; if the plan check asks for more torque:
+./rig sysid --speed 2 --torque-cap 28 28 28 10 10 10
+./rig sysid-fit outputs/sysid/<run1> outputs/sysid/<run2> outputs/sysid/<run3>
+```
+
+Runs under different torque caps can be fitted together (each is replayed under its own cap); runs
+under different PD gains cannot.
 
 ## 3. Fit the parameters (any machine)
 
 ```bash
 .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run>              # full fit, all CPU cores
 .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run> --gens 120   # good first result in ~15 min
+.venv/bin/python scripts/sysid/fit.py outputs/sysid/<run1> outputs/sysid/<run2>   # several runs in one fit
 .venv/bin/python scripts/sysid/fit.py outputs/sysid/<run> --eval <other>/sim_params.json   # score given params
 ```
 
@@ -114,7 +141,8 @@ p.apply_to(env.m)          # any MjModel with joint1..joint6, e.g. BallIntercept
 ```
 
 The parameters describe the arm under the PD gains used during collection (`kp`/`kd` in
-`sim_params.json` → `info`). If you change the controller gains, collect again.
+`sim_params.json` → `info`). These are the gains of the real catch (`./rig catch`, MIT control):
+one definition, `MIT_KP` / `MIT_KD` in `eaiproject/arm.py`. If you change them, collect again.
 
 ## Files
 
