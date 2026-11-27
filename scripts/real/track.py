@@ -205,6 +205,7 @@ def main() -> int:
         if sim is None or frame_i % 3 == 0:
             d.qpos[:] = m.qpos0
             d.qpos[arm_adr] = p.q
+            d.qpos[arm_adr[0]] -= planner.j1_turn          # the sim scene's table is in front: undo the base's turn
             for jn in ("joint7", "joint_left", "joint_right"):
                 d.qpos[m.joint(jn).qposadr[0]] = 0.05
             mujoco.mj_kinematics(m, d)

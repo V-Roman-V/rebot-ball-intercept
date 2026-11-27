@@ -173,6 +173,9 @@ class InterceptPlanner:
         self.max_y, self.max_yaw, self.hover = max_y, max_yaw, hover
         self.turn = rig_calib.ARM_TURN
         self.q_home = home_pose(self.env, plane, hover)
+        # Joint 1's share of the base's turn (its sign as the home pose found it). Subtracting it from q
+        # shows the arm in the sim scene with the table in front, as if the base were not turned.
+        self.j1_turn = float(np.sign(self.q_home[0] - self.env.q_home[0])) * abs(self.turn)
         self.reset()
 
     def reset(self):
