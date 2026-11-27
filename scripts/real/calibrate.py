@@ -59,8 +59,16 @@ NO_SENS = 0.05               # ... and below this the roll cannot be read at all
 HOLD_GAP = 1.0               # s; SPACE repeats arriving within this gap count as "key held"
 GRID = 0.02                  # m, sweep coverage cell
 TARGET_X, TARGET_Y = (rc.GATE_X - 0.06, rc.GATE_X + 0.06), (-0.26, 0.26)      # box to cover around the intercept line
-# The sweep box and its top view are in table axes: the base's turn is rig_calib.BASE_YAW_DEG.
-BASE_YAW_DEG, TABLE_FROM_ARM, arm_xy = rc.BASE_YAW_DEG, rc.TABLE_FROM_ARM, rc.arm_xy
+
+
+def sweep_frame(sess: Path) -> rc.TableFrame:
+    """Table axes for the sweep's guide (its box and top view), before this session has a map: the table
+    is where the corners touched in step 2 are; without touches, as in the existing map; else in front."""
+    path = sess / "touches.json"
+    pts = [t["p"] for t in json.loads(path.read_text())["touches"]] if path.exists() else []
+    if pts:
+        return rc.TableFrame(rc.table_yaw_deg(pts))
+    return rc.RigMap.load(rc.MAP_PATH).frame if rc.MAP_PATH.exists() else rc.TableFrame()
 HD, VGA = (1280, 720, 30), (640, 480, 60)       # camera: the map steps / the ball step (= tracking)
 
 WIN = "rig calibration"
@@ -319,7 +327,8 @@ def run_sweep(cam, arm, sess: Path) -> str:
     if path.exists():
         z = np.load(path)
         strokes.append(list(zip(z["t"], z["q"], z["p"])))
-    top = TopDown(x=(0.10, 0.75), y=(-0.40, 0.40), scale=600.0)
+    frame = sweep_frame(sess)
+    top = TopDown(frame, x=(0.10, 0.75), y=(-0.40, 0.40), scale=600.0)
     pose, last_fn = map_pose(cam, None)            # image overlay only when a map exists already
     toggled, t_key, t_commit, stroke_open, msg = False, -1e9, None, False, ""
 
@@ -350,7 +359,7 @@ def run_sweep(cam, arm, sess: Path) -> str:
             save()
 
         allp = np.array([x[2] for st in strokes for x in st]).reshape(-1, 3)
-        tabp = allp[:, :2] @ TABLE_FROM_ARM.T                  # coverage in table axes
+        tabp = frame.table_xy(allp)                            # coverage in table axes
         cells = {(int(np.floor(p[0] / GRID)), int(np.floor(p[1] / GRID))) for p in tabp}
         tx = range(int(np.floor(TARGET_X[0] / GRID)), int(np.ceil(TARGET_X[1] / GRID)))
         ty = range(int(np.floor(TARGET_Y[0] / GRID)), int(np.ceil(TARGET_Y[1] / GRID)))
@@ -359,16 +368,16 @@ def run_sweep(cam, arm, sess: Path) -> str:
         tv = top.canvas(rc.GATE_X)                 # top view: needs no camera pose
         top.rect(tv, TARGET_X, TARGET_Y, YELLOW, 1)
         for (i, j) in cells:
-            top.cell(tv, arm_xy([[(i + 0.5) * GRID, (j + 0.5) * GRID]])[0], GRID, (0, 170, 0))
+            top.cell(tv, frame.arm_xy([[(i + 0.5) * GRID, (j + 0.5) * GRID]])[0], GRID, (0, 170, 0))
         if s is not None:
             cv2.drawMarker(tv, ipt(top.px(s.p[:2])[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
-        put(tv, f"top view, table axes (base turned {BASE_YAW_DEG:+.0f} deg). green = covered", (8, 16), WHITE, 0.42)
+        put(tv, f"top view, table axes (base turned {frame.yaw_deg:+.0f} deg). green = covered", (8, 16), WHITE, 0.42)
         put(tv, "yellow box = cover this well", (8, 34), YELLOW, 0.42)
 
         if pose is not None:                       # the same on the camera image
             pr = lambda P: rc.project(cam.K, cam.dist, *pose, np.asarray(P, float).reshape(-1, 3))
             z0 = float(np.median(allp[:, 2])) if len(allp) else (float(s.p[2]) if s is not None else 0.0)
-            on_table = lambda xy: np.column_stack([arm_xy(xy), np.full(len(xy), z0)])
+            on_table = lambda xy: np.column_stack([frame.arm_xy(xy), np.full(len(xy), z0)])
             box = pr(on_table([[TARGET_X[0], TARGET_Y[0]], [TARGET_X[1], TARGET_Y[0]],
                                [TARGET_X[1], TARGET_Y[1]], [TARGET_X[0], TARGET_Y[1]]]))
             cv2.polylines(img, [box.round().astype(np.int32)], True, YELLOW, 1, cv2.LINE_AA)
@@ -583,7 +592,7 @@ def run_ball(cam, sess: Path) -> str:
             rig_map = rc.RigMap.load(rc.MAP_PATH)
             first = trk is None
             res = locate_camera(cam, rig_map)
-            trk = make_tracker(camera_calib(cam, res), rig_map.plane, hsv=saved)
+            trk = make_tracker(camera_calib(cam, res), rig_map, hsv=saved)
             msg = ("camera located" + (f" - CHECK: {res.warnings[0]}" if res.warnings else ""))[:150]
             for w in res.warnings:
                 print(f"camera: {w}", flush=True)

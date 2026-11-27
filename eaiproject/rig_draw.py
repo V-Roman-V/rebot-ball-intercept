@@ -45,11 +45,11 @@ def draw_map(img, rig_map: rc.RigMap, K, dist, rvec, tvec, color=MAGENTA, labels
         outline(img, rc.project(K, dist, rvec, tvec, P), color, 1, None if labels is None else labels.get(k))
 
 
-def draw_table_grid(img, K, dist, rvec, tvec, plane, gate_x=0.40, step=0.1):
-    """10 cm grid on the table plane in table axes (x down the table from the base, rig_calib.BASE_YAW_DEG),
-    and the intercept line."""
+def draw_table_grid(img, K, dist, rvec, tvec, rig_map: rc.RigMap, gate_x=0.40, step=0.1):
+    """10 cm grid on the map's table plane in its table axes (x down the table from the base), and the
+    intercept line."""
     pr = lambda P: rc.project(K, dist, rvec, tvec, np.asarray(P, float))
-    on = lambda x, y: rc.line_point(plane, y, 0.0, x)
+    on = lambda x, y: rig_map.frame.line_point(rig_map.plane, y, 0.0, x)
     for x in np.arange(0.1, 1.01, step):
         a, b = pr([on(x, -0.3), on(x, 0.3)])
         cv2.line(img, ipt(a), ipt(b), CYAN, 1, cv2.LINE_AA)
@@ -72,7 +72,8 @@ class TopDown:
     """Top view of the table in table axes (x down the table from the base, to the right; y up).
     px / cell / markers take arm-frame points; canvas, rect and the ranges x, y are in table axes."""
 
-    def __init__(self, x=(-0.05, 1.05), y=(-0.42, 0.42), scale=640.0, margin=34):
+    def __init__(self, frame: rc.TableFrame, x=(-0.05, 1.05), y=(-0.42, 0.42), scale=640.0, margin=34):
+        self.frame = frame
         self.x, self.y, self.s, self.m = x, y, scale, margin
         self.w = int((x[1] - x[0]) * scale) + 2 * margin
         self.h = int((y[1] - y[0]) * scale) + 2 * margin
@@ -84,7 +85,7 @@ class TopDown:
 
     def px(self, xy) -> np.ndarray:
         """Pixels of arm-frame points."""
-        return self.pt(rc.table_xy(np.asarray(xy, float).reshape(-1, 2)))
+        return self.pt(self.frame.table_xy(np.asarray(xy, float).reshape(-1, 2)))
 
     def canvas(self, gate_x: float | None = 0.40) -> np.ndarray:
         img = np.full((self.h, self.w, 3), 32, np.uint8)
@@ -108,7 +109,7 @@ class TopDown:
 
     def cell(self, img, xy, size, color):
         """A square of `size` (table axes) around the arm-frame point xy."""
-        c = rc.table_xy(np.asarray(xy, float)[:2])
+        c = self.frame.table_xy(np.asarray(xy, float)[:2])
         a = self.pt([[c[0] - size / 2, c[1] + size / 2]])[0]
         b = self.pt([[c[0] + size / 2, c[1] - size / 2]])[0]
         cv2.rectangle(img, ipt(a), ipt(b), color, -1)

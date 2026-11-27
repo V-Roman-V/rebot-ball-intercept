@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sim_rig  # noqa: E402
-from test_arm import INIT, REST, ROLL15, FakeBus, SimTime  # noqa: E402
+from test_arm import INIT, REST, ROLL15, FakeBus, SimTime, assert_same_pose  # noqa: E402
 from test_calibrate import BIAS, SimRigCase  # noqa: E402
 from eaiproject import arm, markers  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
@@ -58,11 +58,12 @@ class PoweredScriptsTest(SimRigCase):
         self.assertGreater(h[on_line].min(), 19.0)
         self.assertGreater(h.min(), 15.0, "a move between poses comes close to the table")
         self.assertTrue(self.bus.visits(self.cfg.initial, self.cfg.initial, self.cfg.rest))
-        np.testing.assert_allclose(self.bus.q(), self.cfg.rest)
+        assert_same_pose(self.bus.q(), self.cfg.rest)
         self.assertEqual(self.bus.on, set())
 
     def test_catch(self):
-        """A ball rolled towards the arm: the jaw is where it crosses the intercept line."""
+        """A ball rolled towards the arm: the jaw is where it crosses the intercept line (MIT control,
+        the default), no target dips toward the table, the gripper opens, everything is off at the end."""
         cam = sim_rig.FakeCamera(self.world, 640, 480)
         cam.set_pose((1.55, 0.30, 0.95), (0.55, 0.0, 0.0))
         start, vel, clock = np.array([0.95, 0.12]), np.array([-0.35, -0.04]), {}
@@ -84,8 +85,16 @@ class PoweredScriptsTest(SimRigCase):
         arrived = np.flatnonzero(log["phase"] == 2)
         self.assertGreater(len(arrived), 0)
         self.assertLess(abs(log["jaw"][arrived[0], 1] - y_cross) * 1000, 10.0, out)
+        self.assertIn("control: mit", out)
+        self.assertEqual(set(self.bus.gains), set(arm.ARM_IDS))                  # driven with MIT frames
+        self.assertIn("gripper open", out)
+        self.assertAlmostEqual(self.bus.pos[arm.GRIPPER_ID], arm.GRIP_OPEN)
+        working = np.array(log["q_sent"]) - ROLL15                              # what the loop sent, as motor targets
+        self.assertGreater(self.heights_mm(working).min(), 19.0, "a target below the catch height")
+        step = np.abs(np.diff(log["q_sent"], axis=0)).max(axis=1) / np.clip(np.diff(log["t"]), 1e-3, None)
+        self.assertLess(step.max(), 3.0 * 1.3, "faster than the planner's joint speed")
         self.assertTrue(self.bus.visits(self.cfg.initial, self.cfg.initial, self.cfg.rest))
-        np.testing.assert_allclose(self.bus.q(), self.cfg.rest)
+        assert_same_pose(self.bus.q(), self.cfg.rest)
         self.assertEqual(self.bus.on, set())
 
 

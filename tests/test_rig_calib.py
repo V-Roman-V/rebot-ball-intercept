@@ -127,7 +127,7 @@ class Rig:
             centre = rc.from_plane(self.plane, rc.to_plane(self.plane, [[x, y, 0]])[0], rc.BALL_R)[0]   # true ball centre
             uv = rc.project(K_VGA, DIST, rv, tv, centre)
             if tracker:
-                trk = make_tracker(CameraCalib(K_VGA, DIST, res.rvec, res.tvec, 640, 480), rig_map.plane,
+                trk = make_tracker(CameraCalib(K_VGA, DIST, res.rvec, res.tvec, 640, 480), rig_map,
                                    hsv=((0, 0, 0), (1, 1, 1)))
                 xy = trk.pixel_to_world(uv[0])
             else:

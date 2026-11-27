@@ -4,7 +4,7 @@ The planner is the sim's InterceptPolicy logic (straight-line crossing predictio
 line, jaw facing the ball, rate limits on the jaw pose, IK in the MuJoCo model) driven by the tracker's
 estimate and wall-clock time instead of sim state. Heights are relative to the MEASURED table plane
 (config/rig_map.json, in the arm's own kinematic frame). The line, the roll direction and the jaw's
-heading are in table axes (rig_calib.BASE_YAW_DEG: how the arm base is turned on the table); the
+heading are in table axes (rig_calib.TableFrame, from the map: how the arm base is turned on the table); the
 tracker's estimate is turned into them, the jaw target back into the arm frame for the IK.
 It only computes targets; whether they are sent to the motors is the caller's business.
 """
@@ -26,9 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CAL_DIR = ROOT / "outputs" / "calibration"
 BALL_R = 0.022
 DEFAULT_HSV = ((5, 120, 120), (25, 255, 255))
-# Tracked region of the real table: x down the table, y across it (m), turned into the arm frame
-# with the base's turn on the table (rig_calib.BASE_YAW_DEG).
-TABLE_XY = rig_calib.arm_box((0.12, 1.00), (-0.36, 0.38))
+TRACKED = ((0.12, 1.00), (-0.36, 0.38))      # tracked region of the real table, table axes: x down it, y across (m)
 
 
 def table_z(plane, x, y) -> float:
@@ -89,10 +87,12 @@ def save_hsv(lo, hi):
                                                        "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
 
 
-def make_tracker(calib: CameraCalib, plane, hsv=None) -> BallTracker:
-    """Ball tracker for a camera with a known pose, projecting onto the measured table plane."""
+def make_tracker(calib: CameraCalib, rig_map: rig_calib.RigMap, hsv=None) -> BallTracker:
+    """Ball tracker for a camera with a known pose, projecting onto the map's table plane and looking
+    for the ball on the table as the map places it (TRACKED, in the map's table axes)."""
     lo, hi = hsv or load_hsv()
-    return BallTracker(on_table(calib, plane), ball_r=BALL_R, hsv_lo=lo, hsv_hi=hi, table_xy=TABLE_XY, roi_half=50, bgr=True)
+    return BallTracker(on_table(calib, rig_map.plane), ball_r=BALL_R, hsv_lo=lo, hsv_hi=hi,
+                       table_xy=rig_map.frame.arm_box(*TRACKED), roi_half=50, bgr=True)
 
 
 class HostClock:
@@ -173,18 +173,20 @@ class InterceptPlanner:
     the planned height: the arm never cuts through other poses to catch up. The arm's own speed limit
     (Arm.speed / the firmware's) is a backstop set above this one."""
 
-    def __init__(self, plane, mode: str = "forward", max_lateral_speed: float = 0.6, max_yaw_rate: float = 1.5,
+    def __init__(self, plane, frame: rig_calib.TableFrame, mode: str = "forward",
+                 max_lateral_speed: float = 0.6, max_yaw_rate: float = 1.5,
                  max_y: float = 0.30, max_yaw: float = 0.6, hover: float = 0.015, jaw_height: float | None = None,
                  max_joint_speed: float = 3.0, max_hover_speed: float = 0.15):
         """jaw_height: fingertips above the table at the catch (m); None = the sim's (20 mm, forward mode).
-        max_y: reach along the line (+-0.30 m is reachable at catch height with any jaw heading)."""
+        max_y: reach along the line (+-0.30 m is reachable at catch height with any jaw heading).
+        plane, frame: the table plane and the table axes of the rig map (RigMap.plane, RigMap.frame)."""
         self.env = BallInterceptEnv(mode, jaw_height=jaw_height)
-        self.plane = plane
+        self.plane, self.frame = plane, frame
         self.gate_x, self.jaw_height = self.env.gate_x, self.env.jaw_height
         self.v_lat, self.w_yaw, self.v_hover, self.w_joint = max_lateral_speed, max_yaw_rate, max_hover_speed, max_joint_speed
         self.max_y, self.max_yaw, self.hover = max_y, max_yaw, hover
-        self.turn = rig_calib.ARM_TURN
-        self.q_home = home_pose(self.env, plane, hover)
+        self.turn = frame.turn
+        self.q_home = home_pose(self.env, plane, frame, hover)
         # Joint 1's share of the base's turn (its sign as the home pose found it). Subtracting it from q
         # shows the arm in the sim scene with the table in front, as if the base were not turned.
         self.j1_turn = float(np.sign(self.q_home[0] - self.env.q_home[0])) * abs(self.turn)
@@ -207,11 +209,11 @@ class InterceptPlanner:
 
     def jaw_target(self, y, hover):
         """Arm-frame fingertip target on the intercept line at table y, `hover` above the catch height."""
-        return rig_calib.line_point(self.plane, y, self.jaw_height + hover, self.gate_x)
+        return self.frame.line_point(self.plane, y, self.jaw_height + hover, self.gate_x)
 
     def line_point(self, y, dz: float = 0.0) -> np.ndarray:
         """Arm-frame point of the intercept line at table y, `dz` above the table (for drawing)."""
-        return rig_calib.line_point(self.plane, y, dz, self.gate_x)
+        return self.frame.line_point(self.plane, y, dz, self.gate_x)
 
     def _advance(self, y_goal: float, yaw_goal: float, hover_goal: float, dt: float) -> None:
         """Move the command toward the goals: task-space rate limits, then a shorter step if a joint
@@ -240,9 +242,9 @@ class InterceptPlanner:
         st = trk.state_at(now) if trk.ready else None
         cross, t_cross, phase = None, None, "home"
         y_goal, yaw_goal, hover_goal = self.y_cmd, self.yaw_cmd, self.hover
-        vel = rig_calib.table_xy(st.vel) if st is not None else None
+        vel = self.frame.table_xy(st.vel) if st is not None else None
         if st is not None and vel[0] < -0.05:                 # a tracked ball moving toward the arm
-            pos = rig_calib.table_xy(st.pos)
+            pos = self.frame.table_xy(st.pos)
             dist = float(pos[0]) - self.gate_x
             if dist < -0.05:
                 phase = "arrived"
@@ -283,15 +285,15 @@ def crossing(pos, vel, x_line: float, decel: float = BALL_DECEL) -> tuple[float,
     return y, (speed - float(np.sqrt(speed * speed - 2.0 * decel * d))) / decel
 
 
-def home_pose(env: BallInterceptEnv, plane, dz: float = 0.0) -> np.ndarray:
+def home_pose(env: BallInterceptEnv, plane, frame: rig_calib.TableFrame, dz: float = 0.0) -> np.ndarray:
     """Joint pose with the open jaw at the middle of the intercept line, facing up the table, `dz` above
     the jaw height: the sim's home pose turned at joint 1 by the base's turn, then refined by IK."""
-    jaw = rig_calib.line_point(plane, 0.0, env.jaw_height + dz, env.gate_x)
+    jaw = frame.line_point(plane, 0.0, env.jaw_height + dz, env.gate_x)
     best, best_err = env.q_home.copy(), np.inf
     for sign in (1.0, -1.0):                     # joint 1's sign in the model: keep the turn that reaches the line
         seed = env.q_home.copy()
-        seed[0] = float(np.clip(seed[0] + sign * rig_calib.ARM_TURN, env.arm_lo[0], env.arm_hi[0]))
-        q = env.ik_jaw(*jaw, yaw=rig_calib.ARM_TURN, q0=seed, iters=400)
+        seed[0] = float(np.clip(seed[0] + sign * frame.turn, env.arm_lo[0], env.arm_hi[0]))
+        q = env.ik_jaw(*jaw, yaw=frame.turn, q0=seed, iters=400)
         err = env.jaw_error(q, *jaw)
         if err < best_err:
             best, best_err = q, err

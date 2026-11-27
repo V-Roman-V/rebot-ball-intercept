@@ -74,7 +74,7 @@ def main() -> int:
         for w in res.warnings:
             print(f"  CHECK: {w}", flush=True)
         calib = camera_calib(cam, res)
-        return calib, make_tracker(calib, plane)
+        return calib, make_tracker(calib, rig_map)
 
     try:
         calib, trk = locate()
@@ -102,7 +102,7 @@ def main() -> int:
         K, dist, rvec, tvec = calib.K, calib.dist, calib.rvec, calib.tvec
         found, guided = rc.detect_with_map(f.img, rig_map, K, dist, (rvec, tvec))    # + markers found by prediction
         px, mm = rc.marker_errors(rig_map, K, dist, rvec, tvec, found)
-        draw_table_grid(img, K, dist, rvec, tvec, rig_map.plane, rc.GATE_X)
+        draw_table_grid(img, K, dist, rvec, tvec, rig_map, rc.GATE_X)
         for k, c in found.items():
             outline(img, c, GREEN, 1)
         for k, P in rig_map.markers.items():

@@ -21,12 +21,18 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eaiproject import arm  # noqa: E402
 from eaiproject.ball_intercept_env import BallInterceptEnv  # noqa: E402
-from eaiproject.robstride import ARM_IDS, P_MECHPOS, P_RUN_MODE  # noqa: E402
+from eaiproject.robstride import ARM_IDS, GRIPPER_ID, P_MECHPOS, P_RUN_MODE  # noqa: E402
 
 REST = np.array([0.0946, -0.0029, -0.0001, -0.0003, -0.0537, 2.8035])     # the real arm's folded rest pose (motor)
 INIT = np.array([0.0, 0.9, 0.9, 0.3, 0.0, 0.0])                            # raised, clear of the table (motor)
 WORK = np.array([0.1, 1.2, 1.0, -0.4, 0.1, 0.2])                           # model
 ROLL15 = np.radians([0, 0, 0, 0, 0, 15.0])                                 # the motor's zero is off by this
+
+
+def assert_same_pose(got, want, atol=1e-9):
+    """The same arm pose: joint 1 may differ by whole turns and joint 6 by half turns (arm.SAME_EVERY),
+    since the arm goes to the equivalent angle nearest to where it is."""
+    np.testing.assert_allclose(got, arm.nearest(want, got), atol=atol)
 
 
 def level_pose(pitch: float, yaw: float, x=0.40, y=0.05) -> np.ndarray:
@@ -40,11 +46,12 @@ def level_pose(pitch: float, yaw: float, x=0.40, y=0.05) -> np.ndarray:
 
 
 class FakeBus:
-    """Six motors in position mode that reach their target at once while enabled."""
+    """Six arm motors (position or MIT mode) and the gripper, reaching their target at once while enabled."""
 
-    def __init__(self, q_motor, run_mode_sticks: bool = True):
-        self.pos = dict(zip(ARM_IDS, map(float, q_motor)))
-        self.params = {m: {} for m in ARM_IDS}
+    def __init__(self, q_motor, run_mode_sticks: bool = True, gripper: float = 0.3):
+        self.pos = dict(zip(ARM_IDS, map(float, q_motor))) | {GRIPPER_ID: gripper}
+        self.params = {m: {arm.P_LIMIT_TORQUE: 36.0 if m <= 3 else 14.0} for m in ARM_IDS} | {GRIPPER_ID: {}}
+        self.gains: dict[int, tuple] = {}             # MIT: the last (kp, kd) per motor
         self.on: set[int] = set()
         self.enable_order: list[int] = []
         self.targets: list[np.ndarray] = []           # the full motor target after every command
@@ -68,6 +75,10 @@ class FakeBus:
             if m == ARM_IDS[-1]:
                 self.targets.append(np.array([self.params[k][arm.P_LOC_REF] for k in ARM_IDS]))
 
+    def mit(self, m, pos, kp, kd, vel=0.0, tau=0.0):
+        self.gains[m] = (kp, kd)
+        self.write_param_f32(m, arm.P_LOC_REF, pos)   # a target, as in position mode
+
     def enable(self, m):
         self.on.add(m)
         self.enable_order.append(m)
@@ -85,7 +96,7 @@ class FakeBus:
         """The targets pass through `poses` (motor angles) in this order."""
         i = 0
         for t in self.targets:
-            if i < len(poses) and np.allclose(t, poses[i], atol=1e-9):
+            if i < len(poses) and np.allclose(t, arm.nearest(poses[i], t), atol=1e-9):     # the same pose (see assert_same_pose)
                 i += 1
         return i == len(poses)
 
@@ -206,10 +217,11 @@ class ArmTest(unittest.TestCase):
             a.enable()
             n0 = len(bus.targets)
             reached = a.go(WORK)
-        np.testing.assert_allclose(reached, WORK)
+        work = arm.nearest(WORK, REST + ROLL15)                                 # the equivalent pose nearest the arm
+        np.testing.assert_allclose(reached, work)
         T = np.array(bus.targets[n0:])
-        np.testing.assert_allclose(T[-1], WORK - ROLL15)
-        d = (WORK - ROLL15) - REST
+        np.testing.assert_allclose(T[-1], work - ROLL15)
+        d = (work - ROLL15) - REST
         s = (T - REST) @ d / (d @ d)
         np.testing.assert_allclose(T, REST + s[:, None] * d, atol=1e-12)      # on the line
         self.assertTrue(np.all(np.diff(s) > 0))                                 # never back
@@ -228,9 +240,21 @@ class PoweredTest(unittest.TestCase):
             a.go(WORK)
         self.assertEqual(len(asks), 1)                                          # ENTER before powering, nothing else
         self.assertTrue(bus.visits(INIT, WORK - ROLL15, INIT, REST))
-        np.testing.assert_allclose(bus.q(), REST)
+        assert_same_pose(bus.q(), REST)
         self.assertEqual(bus.on, set())
         self.assertTrue(bus.closed)
+
+    def test_long_way_round_is_never_taken(self):
+        """A target a whole turn away at joint 1 (the rest pose reads 267 deg, the plan says -90) or half a
+        turn at joint 6 is the pose the arm is in: it does not move."""
+        rest = np.radians([267.2, 0.4, 0.0, -0.1, 1.1, 211.5])
+        bus = FakeBus(rest)
+        a = arm.Arm(arm.ArmConfig(), bus)
+        with no_sleep():
+            a.enable()
+            a.go(rest - np.radians([360.0, 0, 0, 0, 0, 180.0]))
+        T = np.array(bus.targets)
+        self.assertLess(np.abs(T - rest).max(), 1e-9)
 
     def test_without_poses_it_ends_where_it_started(self):
         start = INIT + 0.05
@@ -238,20 +262,39 @@ class PoweredTest(unittest.TestCase):
         with no_sleep(), arm.powered(arm.ArmConfig(), bus, ask=lambda s: "") as a:
             a.go(WORK)
         self.assertTrue(bus.visits(WORK, start))
-        np.testing.assert_allclose(bus.q(), start)
+        assert_same_pose(bus.q(), start)
         self.assertEqual(bus.on, set())
 
-    def test_ctrl_c_holds_then_releases_after_enter(self):
+    def test_ctrl_c_holds_then_enter_takes_it_back_to_rest(self):
         bus, asks = FakeBus(REST), []
-        powered_at_ask = []
-        ask = lambda s: (asks.append(s), powered_at_ask.append(len(bus.on)))
+        powered_at_ask, pose_at_ask = [], []
+        ask = lambda s: (asks.append(s), powered_at_ask.append(len(bus.on)), pose_at_ask.append(bus.q()))
         with no_sleep(), arm.powered(self.CFG, bus, ask=ask) as a:
             a.go(WORK)
             raise KeyboardInterrupt
-        self.assertIn("Support the arm", asks[-1])
+        self.assertEqual(len(asks), 2)
+        self.assertIn("back to rest", asks[-1])
         self.assertEqual(powered_at_ask[-1], 6)                                 # still holding while asking
-        np.testing.assert_allclose(bus.q(), WORK - ROLL15)                      # held there, not taken home
-        np.testing.assert_allclose(bus.targets[-1], WORK - ROLL15)
+        assert_same_pose(pose_at_ask[-1], WORK - ROLL15)                        # held where it was
+        self.assertTrue(bus.visits(INIT, WORK - ROLL15, INIT, REST))            # then home by itself
+        assert_same_pose(bus.q(), REST)
+        self.assertEqual(bus.on, set())
+
+    def test_when_it_cannot_go_back_enter_releases_it_in_place(self):
+        bus, asks = FakeBus(REST), []
+
+        def ask(s):
+            asks.append(s)
+            if "back to rest" in s:
+                bus.read_param_f32 = lambda *a, **k: None                       # the bus is lost before the way back
+
+        with no_sleep(), arm.powered(self.CFG, bus, ask=ask) as a:
+            a.go(WORK)
+            raise KeyboardInterrupt
+        self.assertEqual(len(asks), 3)
+        self.assertIn("could not go back to rest", asks[-1])
+        self.assertIn("Support the arm", asks[-1])
+        assert_same_pose(bus.q(), WORK - ROLL15)                                # not moved
         self.assertEqual(bus.on, set())
 
     def test_an_error_holds_releases_and_is_raised(self):
@@ -276,7 +319,7 @@ class PoweredTest(unittest.TestCase):
                 a.go(WORK)
                 raise KeyboardInterrupt
         self.assertEqual(held_at_ask, [6])                                      # held until the second press
-        np.testing.assert_allclose(bus.targets[-1], WORK - ROLL15)              # dropped there, not taken home
+        assert_same_pose(bus.targets[-1], WORK - ROLL15)                        # dropped there, not taken home
         self.assertEqual(bus.on, set())
         self.assertTrue(bus.closed)
 
@@ -299,7 +342,7 @@ class PoweredTest(unittest.TestCase):
                 armed.append(1)
                 raise KeyboardInterrupt
         self.assertFalse(any("holding" in s for s in asks))
-        np.testing.assert_allclose(bus.targets[-1], WORK - ROLL15)              # the hold was sent whole
+        assert_same_pose(bus.targets[-1], WORK - ROLL15)                        # the hold was sent whole
         self.assertEqual(bus.on, set())
         self.assertIs(signal.getsignal(signal.SIGINT), before)
 

@@ -78,7 +78,8 @@ def main() -> int:
     for w in res.warnings:
         print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
-    trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane, jaw_height=args.height / 1000, max_joint_speed=args.joint_speed), HostClock()
+    trk, clock = make_tracker(calib, rig_map), HostClock()
+    planner = InterceptPlanner(plane, rig_map.frame, jaw_height=args.height / 1000, max_joint_speed=args.joint_speed)
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
     log = {k: [] for k in ("t", "ball", "meas", "ball_px", "jaw", "q", "q_sent", "q_meas", "phase")}
@@ -129,7 +130,7 @@ def main() -> int:
                     cp = proj([planner.line_point(p.crossing_y, BALL_R)])[0]
                     cv2.line(img, ipt(c), ipt(cp), MAGENTA, 1)
                     cv2.drawMarker(img, ipt(cp), MAGENTA, cv2.MARKER_TILTED_CROSS, 14, 2)
-                along = np.r_[rc.arm_xy([[0.0, 0.03]])[0], 0.0]              # 3 cm along the line
+                along = np.r_[planner.frame.arm_xy([[0.0, 0.03]])[0], 0.0]   # 3 cm along the line
                 jl, jr = proj([p.jaw - along, p.jaw + along])
                 cv2.line(img, ipt(jl), ipt(jr), YELLOW, 3)
                 put(img, f"POWERED  {p.phase}" + (

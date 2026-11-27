@@ -38,38 +38,56 @@ MAP_PATH = ROOT / "config" / "rig_map.json"                 # committed: marker 
 OUT_DIR = ROOT / "outputs" / "calibration"                  # last camera pose, ball colour, check screenshots
 SESSIONS_DIR = ROOT / "outputs" / "rig_calib"               # raw observations per table-map session (git-ignored)
 GATE_X = 0.40                                               # intercept line of the "forward" mode
-# How the arm base is turned on the table, seen from above: 0 = joint 1's zero points down the table,
-# -90 = turned 90 deg to the right (the table then lies along the arm's +y).
-BASE_YAW_DEG = -90.0
-_cy, _sy = np.cos(np.radians(BASE_YAW_DEG)), np.sin(np.radians(BASE_YAW_DEG))
-TABLE_FROM_ARM = np.array([[_cy, -_sy], [_sy, _cy]])        # 2D rotation: arm-frame xy -> table axes (x down the table)
 
 
-ARM_TURN = -np.radians(BASE_YAW_DEG)                       # rad: direction of the table's +x, in the arm frame
-# Everything measured (map, plane, camera pose, tracker, joints) is in the arm frame; the intercept
-# line (x = GATE_X), the roll direction (-x) and the jaw's heading are in table axes.
+@dataclass(frozen=True)
+class TableFrame:
+    """How the arm base is turned on the table, seen from above: yaw_deg = 0 when joint 1's zero points
+    down the table, -90 when the base is turned 90 deg to the right (the table then lies along the
+    arm's +y). It belongs to the table map (RigMap.frame).
+
+    Everything measured (map, plane, camera pose, tracker, joints) is in the arm frame. The intercept
+    line (x = GATE_X), the roll direction (-x) and the jaw's heading are in table axes: x down the
+    table from the base, y to the left. This class converts between the two."""
+    yaw_deg: float = 0.0
+
+    @property
+    def turn(self) -> float:
+        """rad: the direction of the table's +x in the arm frame."""
+        return -float(np.radians(self.yaw_deg))
+
+    @property
+    def table_from_arm(self) -> np.ndarray:
+        c, s = np.cos(np.radians(self.yaw_deg)), np.sin(np.radians(self.yaw_deg))
+        return np.array([[c, -s], [s, c]])
+
+    def arm_xy(self, P_table) -> np.ndarray:
+        """(N, 2) points in table axes -> arm frame."""
+        return np.asarray(P_table, float).reshape(-1, 2) @ self.table_from_arm
+
+    def table_xy(self, v_arm) -> np.ndarray:
+        """Arm-frame xy point(s) or velocity(ies), shape (..., 2+) -> table axes, shape (..., 2)."""
+        return np.asarray(v_arm, float)[..., :2] @ self.table_from_arm.T
+
+    def line_point(self, plane, y: float, dz: float = 0.0, x: float = GATE_X) -> np.ndarray:
+        """Arm-frame (x, y, z) of the point at table axes (x, y) on the table plane, `dz` above it."""
+        ax, ay = self.arm_xy([[x, y]])[0]
+        return np.array([ax, ay, float(plane_z(plane, ax, ay)) + dz])
+
+    def arm_box(self, x_range, y_range) -> tuple:
+        """A box in table axes -> the arm-frame box ((x0, x1), (y0, y1)) around it."""
+        P = self.arm_xy([[x, y] for x in x_range for y in y_range])
+        return (float(P[:, 0].min()), float(P[:, 0].max())), (float(P[:, 1].min()), float(P[:, 1].max()))
 
 
-def arm_xy(P_table) -> np.ndarray:
-    """(N, 2) points in table axes -> arm frame."""
-    return np.asarray(P_table, float).reshape(-1, 2) @ TABLE_FROM_ARM
-
-
-def table_xy(v_arm) -> np.ndarray:
-    """Arm-frame xy point(s) or velocity(ies), shape (..., 2+) -> table axes, shape (..., 2)."""
-    return np.asarray(v_arm, float)[..., :2] @ TABLE_FROM_ARM.T
-
-
-def line_point(plane, y: float, dz: float = 0.0, x: float = GATE_X) -> np.ndarray:
-    """Arm-frame (x, y, z) of the point at table axes (x, y) on the table plane, `dz` above it."""
-    ax, ay = arm_xy([[x, y]])[0]
-    return np.array([ax, ay, float(plane_z(plane, ax, ay)) + dz])
-
-
-def arm_box(x_range, y_range) -> tuple:
-    """A box in table axes -> the arm-frame box ((x0, x1), (y0, y1)) around it."""
-    P = arm_xy([[x, y] for x in x_range for y in y_range])
-    return (float(P[:, 0].min()), float(P[:, 0].max())), (float(P[:, 1].min()), float(P[:, 1].max()))
+def table_yaw_deg(points) -> float:
+    """The base's turn for a table that lies where these arm-frame points are (marker centres, touched
+    corners): the table is in the direction of their middle, taken to the nearest quarter turn (an arm
+    is bolted square to its table). 0 when the points surround the base."""
+    c = np.asarray(points, float).reshape(-1, np.asarray(points).shape[-1])[:, :2].mean(axis=0)
+    if np.linalg.norm(c) < 0.10:
+        return 0.0
+    return float(-90.0 * np.round(np.degrees(np.arctan2(c[1], c[0])) / 90.0)) or 0.0
 
 CORNER_NAMES = ("TL", "TR", "BR", "BL", "C")
 CENTRE = 4
@@ -424,9 +442,18 @@ class RigMap:
     stats: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     sources: dict = field(default_factory=dict)
+    base_yaw_deg: float | None = None    # the base's turn on the table; None = from where the markers are
 
     def centre(self, key: str) -> np.ndarray:
         return self.markers[key].mean(axis=0)
+
+    @property
+    def frame(self) -> TableFrame:
+        """Table axes of this rig (see TableFrame). The turn is read from where the markers lie; a
+        "base_yaw_deg" written by hand in rig_map.json overrides it (an arm not square to its table)."""
+        if self.base_yaw_deg is not None:
+            return TableFrame(float(self.base_yaw_deg))
+        return TableFrame(table_yaw_deg([c.mean(axis=0) for c in self.markers.values()]))
 
     def is_far(self, key: str) -> bool:
         return float(np.linalg.norm(self.centre(key)[:2])) >= self.far_dist
@@ -442,7 +469,8 @@ class RigMap:
         return {"version": 1, "time": self.time,
                 "frame": "arm kinematic base frame (eaiproject.kinematics.Fingertip), metres",
                 "corner_order": "TL, TR, BR, BL (OpenCV ArUco)",
-                "plane_z=a+bx+cy": [float(v) for v in self.plane], "far_dist": self.far_dist, "markers": mk,
+                "plane_z=a+bx+cy": [float(v) for v in self.plane], "far_dist": self.far_dist,
+                "base_yaw_deg": self.frame.yaw_deg, "markers": mk,
                 "stats": self.stats, "warnings": self.warnings, "sources": self.sources}
 
     def save(self, path) -> None:
@@ -458,7 +486,8 @@ class RigMap:
                       touched={k: [CORNER_NAMES.index(n) for n in d["markers"][k]["touched_corners"]] for k in mk
                                if d["markers"][k].get("touched_corners")},
                       far_dist=float(d.get("far_dist", FAR_DIST)), time=d.get("time", ""),
-                      stats=d.get("stats", {}), warnings=d.get("warnings", []), sources=d.get("sources", {}))
+                      stats=d.get("stats", {}), warnings=d.get("warnings", []), sources=d.get("sources", {}),
+                      base_yaw_deg=d.get("base_yaw_deg"))
 
     @staticmethod
     def load(path) -> "RigMap":
@@ -743,7 +772,8 @@ def solve_rig(obs: Observations, far_dist: float = FAR_DIST) -> RigSolution:
                   "used": int(use.sum()), "cells": prob.n_cells, "sigma_mm": round(sig * 1000, 2)},
         "sweep_rms_mm": round(rms(sweep) * 1000, 2),
         "plane_z=a+bx+cy": [float(v) for v in plane],
-        "table_on_line_mm": {f"{y:+.2f}": round(float(line_point(plane, y)[2]) * 1000, 2) for y in (-0.24, 0.0, 0.24)},
+        "table_on_line_mm": {f"{y:+.2f}": round(float(TableFrame(table_yaw_deg(P[:, 4])).line_point(plane, y)[2]) * 1000, 2)
+                             for y in (-0.24, 0.0, 0.24)},
         "far_markers": [k for i, k in enumerate(keys) if np.linalg.norm(P[i, 4, :2]) >= far_dist],
     }
     # Scale check: the camera measures distances in units of the printed marker size, the arm directly.

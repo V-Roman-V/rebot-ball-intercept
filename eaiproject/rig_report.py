@@ -45,7 +45,7 @@ def report_text(sol: rc.RigSolution) -> str:
 
 def layout_image(sol: rc.RigSolution) -> np.ndarray:
     """Top view: fitted markers, touches (errors drawn 20x), camera positions, swept area."""
-    top = TopDown()
+    top = TopDown(sol.rig_map.frame)
     img = top.canvas(rc.GATE_X)
     for p in sol.sweep_points:
         top.cell(img, p[:2], 0.02, (60, 80, 60))
@@ -59,7 +59,7 @@ def layout_image(sol: rc.RigSolution) -> np.ndarray:
         cv2.line(img, ipt(a), ipt(b), MAGENTA, 1, cv2.LINE_AA)
     for name, (rv, tv) in sol.cams.items():
         C = rc.camera_centre(rv, tv)
-        c = top.pt(np.clip(rc.table_xy(C[:2]), [top.x[0], top.y[0]], [top.x[1], top.y[1]]))[0]
+        c = top.pt(np.clip(top.frame.table_xy(C[:2]), [top.x[0], top.y[0]], [top.x[1], top.y[1]]))[0]
         cv2.drawMarker(img, ipt(c), WHITE, cv2.MARKER_TRIANGLE_UP, 10, 1)
         put(img, f"{name.split('_')[-1]} h{C[2]:.2f}", c + [6, 4], GREY, 0.35)
     put(img, "table map, table axes (m). yellow = touched markers, magenta = touch error x20, triangles = camera views, "
@@ -71,7 +71,7 @@ def layout_image(sol: rc.RigSolution) -> np.ndarray:
 
 def heatmap_image(sol: rc.RigSolution, vmax_mm: float = 3.0) -> np.ndarray:
     """Sweep height residuals against the fitted plane, over the table."""
-    top = TopDown(x=(0.10, 0.75), y=(-0.40, 0.40), scale=900.0)
+    top = TopDown(sol.rig_map.frame, x=(0.10, 0.75), y=(-0.40, 0.40), scale=900.0)
     img = top.canvas(rc.GATE_X)
     for p, r in zip(sol.sweep_points, sol.sweep_residuals):
         top.cell(img, p[:2], 0.02, diverging(r * 1000, vmax_mm))

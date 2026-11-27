@@ -33,18 +33,19 @@ from eaiproject.real_intercept import home_pose  # noqa: E402
 MAX_IK_ERR = 0.003           # m: passes the arm reaches worse than this run anyway, with a warning
 
 
-def plan(env: BallInterceptEnv, plane, heights, y_max: float, speed: float):
+def plan(env: BallInterceptEnv, rig_map: rc.RigMap, heights, y_max: float, speed: float):
     """[(height, joint path)] along the intercept line, highest first, alternating direction; the
     path of each pass is eased, peaking at 1.5x `speed`. Also returns the largest IK error (m).
-    y runs along the line in table axes (rig_calib.BASE_YAW_DEG: the arm base's turn on the table)."""
-    q, err, out = home_pose(env, plane, max(heights) - env.jaw_height), 0.0, []
+    y runs along the line in the map's table axes (rig_calib.TableFrame: the arm base's turn on the table)."""
+    plane, frame = rig_map.plane, rig_map.frame
+    q, err, out = home_pose(env, plane, frame, max(heights) - env.jaw_height), 0.0, []
     for i, h in enumerate(sorted(heights, reverse=True)):
         y0, y1 = (-y_max, y_max) if i % 2 == 0 else (y_max, -y_max)
         n = max(int(np.ceil(abs(y1 - y0) * 1.5 / speed * arm_mod.RATE)), 1)
         path = []
         for j, y in enumerate(np.r_[y0, y0 + arm_mod.ease(n) * (y1 - y0)]):
-            x, yy, z = rc.line_point(plane, y, h, env.gate_x)
-            q = env.ik_jaw(x, yy, z, yaw=rc.ARM_TURN, q0=q, iters=400 if j == 0 else 40)
+            x, yy, z = frame.line_point(plane, y, h, env.gate_x)
+            q = env.ik_jaw(x, yy, z, yaw=frame.turn, q0=q, iters=400 if j == 0 else 40)
             err = max(err, env.jaw_error(q, x, yy, z))
             path.append(q)
         out.append((h, np.array(path)))
@@ -60,9 +61,10 @@ def main() -> int:
     if not rc.MAP_PATH.exists():
         print("config/rig_map.json not found: run ./rig calibrate first")
         return 2
-    plane = rc.RigMap.load(rc.MAP_PATH).plane
+    rig_map = rc.RigMap.load(rc.MAP_PATH)
+    plane = rig_map.plane
     env, tip = BallInterceptEnv("forward"), Fingertip()
-    passes, err = plan(env, plane, [h / 1000 for h in args.heights], args.y, args.speed)
+    passes, err = plan(env, rig_map, [h / 1000 for h in args.heights], args.y, args.speed)
     if err > MAX_IK_ERR:
         print(f"CHECK: the arm reaches the passes only within {err * 1000:.1f} mm (the heights printed below are what "
               "it really does); smaller --y or higher --heights fit better")
@@ -88,7 +90,7 @@ def main() -> int:
             print(f"                end   {height(q):.1f} mm above the table", flush=True)
         x, y = tip(path[-1])[:2]
         z = rc.plane_z(plane, x, y) + max(passes[0][0], 0.06)
-        arm.go(env.ik_jaw(x, y, z, yaw=rc.ARM_TURN, q0=path[-1], iters=400))        # lift straight up first
+        arm.go(env.ik_jaw(x, y, z, yaw=rig_map.frame.turn, q0=path[-1], iters=400))        # lift straight up first
     return 0
 
 

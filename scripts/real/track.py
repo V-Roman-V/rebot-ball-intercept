@@ -60,7 +60,7 @@ def setup(cam, rig_map):
     for w in res.warnings:
         print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
-    return calib, make_tracker(calib, rig_map.plane), rig_calib.PoseMonitor(rig_map, calib.K, calib.dist, calib.rvec, calib.tvec)
+    return calib, make_tracker(calib, rig_map), rig_calib.PoseMonitor(rig_map, calib.K, calib.dist, calib.rvec, calib.tvec)
 
 
 def main() -> int:
@@ -84,7 +84,8 @@ def main() -> int:
         print(f"CANNOT LOCATE THE CAMERA: {e}")
         cam.close()
         return 1
-    planner = InterceptPlanner(plane, jaw_height=args.height / 1000)
+    planner = InterceptPlanner(plane, rig_map.frame, jaw_height=args.height / 1000)
+    frame = planner.frame
     gx = planner.gate_x
     clock = HostClock()
     mon_thread, mon_warned = None, False
@@ -133,7 +134,7 @@ def main() -> int:
 
         # ---- roll bookkeeping
         st = trk.state_at(now) if trk.ready else None
-        moving = st is not None and rig_calib.table_xy(st.vel)[0] < -0.15     # rolling down the table toward the arm
+        moving = st is not None and frame.table_xy(st.vel)[0] < -0.15     # rolling down the table toward the arm
         if moving and roll is None:
             roll = Roll()
             roll.t0 = now
@@ -143,7 +144,7 @@ def main() -> int:
             if p.phase == "tracking" and p.crossing_y is not None and p.t_cross is not None:
                 roll.preds.append((p.t_cross, p.crossing_y))
                 roll.speed = float(np.linalg.norm(st.vel))
-            hist = [(t, rig_calib.table_xy(xy)) for t, xy in trk.history[-2:]]     # table axes
+            hist = [(t, frame.table_xy(xy)) for t, xy in trk.history[-2:]]     # table axes
             if len(hist) >= 2 and hist[-1][1][0] < gx <= hist[-2][1][0]:     # crossed between the last 2 measurements
                 (t1, a), (t2, b) = hist[-2], hist[-1]
                 s = (a[0] - gx) / (a[0] - b[0])
@@ -179,7 +180,7 @@ def main() -> int:
                 cv2.line(img, tuple(c), tuple(cp), (255, 0, 255), 1)
                 cv2.drawMarker(img, tuple(cp), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
         jw = proj([p.jaw])[0]
-        along = np.r_[rig_calib.arm_xy([[0.0, 0.05]])[0], 0.0]          # 5 cm along the line
+        along = np.r_[frame.arm_xy([[0.0, 0.05]])[0], 0.0]          # 5 cm along the line
         jl = proj([p.jaw - along])[0]
         jr = proj([p.jaw + along])[0]
         cv2.line(img, tuple(jl), tuple(jr), (0, 255, 255), 3)          # open jaw, 10 cm
@@ -189,7 +190,7 @@ def main() -> int:
         put(img, f"{status}  {fps:4.1f} fps  frame age {(now - f.t_host)*1000:3.0f} ms  CV {np.mean(trk.timing_ms[-30:]):.1f} ms",
             (8, 18), col)
         if st is not None:
-            bx, by = rig_calib.table_xy(st.pos)
+            bx, by = frame.table_xy(st.pos)
             put(img, f"ball {bx*100:5.1f} cm down the table, {by*100:+5.1f} cm across  v {np.linalg.norm(st.vel):.2f} m/s", (8, 38))
         if p.crossing_y is not None:
             when = "stops before the line" if p.t_cross is None else f"in {p.t_cross*1000:4.0f} ms"

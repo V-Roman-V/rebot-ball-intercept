@@ -20,6 +20,7 @@ from eaiproject.real_intercept import BALL_DECEL, InterceptPlanner, crossing  # 
 
 FPS = 60.0
 PLANE = np.zeros(3)
+FRAME = rc.TableFrame(-90.0)       # as on the real rig: the base turned 90 deg to the right
 
 
 class CrossingTest(unittest.TestCase):
@@ -63,7 +64,7 @@ class Tracker:
         tau = min(tau, speed / BALL_DECEL) if speed > 0 else tau
         p = self.p0 + self.v0 * tau - 0.5 * BALL_DECEL * e * tau**2
         v = self.v0 - BALL_DECEL * e * tau
-        return SimpleNamespace(pos=rc.arm_xy([p])[0], vel=rc.arm_xy([v])[0])
+        return SimpleNamespace(pos=FRAME.arm_xy([p])[0], vel=FRAME.arm_xy([v])[0])
 
     def at(self, now: float) -> "Tracker":
         self.ready = self.p0 is not None and now >= self.t0
@@ -88,7 +89,7 @@ class PlannerSpeedTest(unittest.TestCase):
 
     def test_fast_roll_keeps_the_joint_speed_and_the_height(self):
         for limit in (1.5, 3.0):
-            pl = InterceptPlanner(PLANE, max_joint_speed=limit)
+            pl = InterceptPlanner(PLANE, FRAME, max_joint_speed=limit)
             plans = self.run_roll(pl, Tracker([0.95, 0.0], [-1.0, 0.33]), 1.0)     # fast, far to the side: more than the arm can do
             q = np.array([p.q for _, p in plans])
             speed = np.abs(np.diff(q, axis=0)).max() * FPS
@@ -101,7 +102,7 @@ class PlannerSpeedTest(unittest.TestCase):
             self.assertTrue(all(p.ik_err < 0.002 for _, p in plans))
 
     def test_reachable_roll_is_met_at_the_line(self):
-        pl = InterceptPlanner(PLANE)
+        pl = InterceptPlanner(PLANE, FRAME)
         trk = Tracker([0.95, -0.05], [-0.6, 0.15])
         y_true, t_true = crossing(trk.p0, trk.v0, pl.gate_x)
         plans = self.run_roll(pl, trk, 1.4)
@@ -113,7 +114,7 @@ class PlannerSpeedTest(unittest.TestCase):
         self.assertLess(abs(self.height(at_line.q) - pl.jaw_height), 0.002)   # lowered to the catch height
 
     def test_no_ball_or_a_receding_ball_does_not_move_the_jaw(self):
-        pl = InterceptPlanner(PLANE)
+        pl = InterceptPlanner(PLANE, FRAME)
         for trk in (Tracker(), Tracker([0.5, 0.2], [0.7, 0.0])):
             trk.t0 = 0.0
             plans = self.run_roll(pl, trk, 0.6)
@@ -121,13 +122,13 @@ class PlannerSpeedTest(unittest.TestCase):
             self.assertLess(max(abs(p.jaw_y) for _, p in plans), 1e-9)
 
     def test_reach_is_30_cm(self):
-        pl = InterceptPlanner(PLANE)
+        pl = InterceptPlanner(PLANE, FRAME)
         plans = self.run_roll(pl, Tracker([0.95, 0.45], [-0.5, 0.0]), 1.4)      # crosses beyond the reach
         self.assertAlmostEqual(max(p.jaw_y for _, p in plans), 0.30, places=3)
         self.assertTrue(all(p.ik_err < 0.002 for _, p in plans))
 
     def test_recentre_goes_back_at_the_planners_speed(self):
-        pl = InterceptPlanner(PLANE, max_joint_speed=2.0)
+        pl = InterceptPlanner(PLANE, FRAME, max_joint_speed=2.0)
         plans = self.run_roll(pl, Tracker([0.95, 0.2], [-0.7, 0.0]), 1.0)
         self.assertGreater(plans[-1][1].jaw_y, 0.15)
         pl.recentre()
