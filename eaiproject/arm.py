@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .robstride import ARM_IDS, P_MECHPOS, P_RUN_MODE
+from .robstride import ARM_IDS, GRIPPER_ID, P_MECHPOS, P_RUN_MODE, TARGET_MAX, TARGET_MIN
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "outputs" / "calibration" / "arm.json"
@@ -47,6 +47,8 @@ SPEED = 0.8                               # rad/s, firmware speed limit of every
 CUR_CAP = {1: 6.0, 2: 18.0, 3: 14.0, 4: 5.0, 5: 4.0, 6: 4.0}     # A, firmware current limit (2 and 3 carry the arm)
 MOVE_SPEED = 0.3                          # rad/s, peak joint speed of go() (moves between poses)
 RATE = 50.0                               # Hz, go() streams its targets at this rate
+GRIP_OPEN = 4.5                           # motor rad: gripper opened for the catch (travel 0 closed .. 5 open)
+GRIP_SPEED, GRIP_CUR = 2.0, 2.0           # rad/s, A: the gripper's firmware speed limit and current cap
 
 
 # ------------------------------------------------------------------------------------ arm.json
@@ -319,12 +321,13 @@ class Arm:
     applied here, at the motor boundary. Joints 1 and 6 go to the equivalent angle nearest the arm
     (see SAME_EVERY)."""
 
-    def __init__(self, cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, caps: dict | None = None):
+    def __init__(self, cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, caps: dict | None = None,
+                 gripper: bool = False):
         from .robstride import RobStrideBus
         self.cfg = cfg or load()
-        self.rs = rs if rs is not None else RobStrideBus(movable=ARM_IDS)
+        self.rs = rs if rs is not None else RobStrideBus(movable=ARM_IDS + ((GRIPPER_ID,) if gripper else ()))
         self.speed, self.caps = speed, dict(caps or CUR_CAP)
-        self.enabled = False
+        self.enabled, self.grip_on = False, False
         self.last = None                                  # last target sent (model), for nearest()
 
     def read(self) -> np.ndarray:
@@ -393,14 +396,43 @@ class Arm:
         time.sleep(settle)
         return self.read()
 
+    def open_gripper(self, target: float = GRIP_OPEN) -> str | None:
+        """Gripper (motor 7) to `target` motor rad in position mode (speed limit, current cap), held
+        until release(). Returns a warning instead when it cannot: then open it by hand."""
+        g = None
+        for _ in range(3):
+            g = self.rs.read_param_f32(GRIPPER_ID, P_MECHPOS, timeout=0.02)
+            if g is not None:
+                break
+        if g is None:
+            return "the gripper (motor 7) does not answer: open it by hand"
+        if not -0.3 <= g <= TARGET_MAX + 0.3:
+            return f"the gripper reads {g:.2f} rad, outside its 0..5 rad travel (zero not set?): open it by hand"
+        target = float(np.clip(target, TARGET_MIN, TARGET_MAX))
+        with _ctrl_c_after():
+            self.rs.stop(GRIPPER_ID)
+            self.rs.write_param_u8(GRIPPER_ID, P_RUN_MODE, RUN_MODE_POSITION)
+            time.sleep(0.01)
+            if self.rs.read_param_u8(GRIPPER_ID, P_RUN_MODE) != RUN_MODE_POSITION:
+                return "the gripper did not switch to position mode: open it by hand"
+            self.rs.write_param_f32(GRIPPER_ID, P_LIMIT_SPD, GRIP_SPEED)
+            self.rs.write_param_f32(GRIPPER_ID, P_LIMIT_CUR, GRIP_CUR)
+            self.rs.write_param_f32(GRIPPER_ID, P_LOC_REF, float(g))
+            self.grip_on = True
+            self.rs.enable(GRIPPER_ID)
+            self.rs.write_param_f32(GRIPPER_ID, P_LOC_REF, target)
+        time.sleep(abs(target - g) / GRIP_SPEED + 0.3)
+        return None
+
     def release(self) -> None:
-        """Stop every joint (three rounds). Runs whole: a Ctrl+C meanwhile comes right after."""
+        """Stop every joint, and the gripper if it was powered (three rounds). Runs whole: a Ctrl+C
+        meanwhile comes right after."""
         with _ctrl_c_after():
             for _ in range(3):
-                for m in ARM_IDS:
+                for m in ARM_IDS + ((GRIPPER_ID,) if self.grip_on else ()):
                     self.rs.stop(m)
                 time.sleep(0.01)
-            self.enabled = False
+            self.enabled, self.grip_on = False, False
 
     def close(self) -> None:
         try:
@@ -411,9 +443,10 @@ class Arm:
 
 
 @contextmanager
-def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None):
+def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None, grip: float | None = None):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
-    Without recorded poses it starts and ends where the arm was resting.
+    Without recorded poses it starts and ends where the arm was resting. `grip` (motor rad): at the
+    initial pose the gripper opens to it and stays powered until the release (None: not touched).
 
     Ctrl+C (or an error) holds the arm where it is. Then ENTER takes it back to rest (through the
     initial pose) and releases it there, and the caller goes on after its `with` (saves its log); if
@@ -422,7 +455,7 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
     alone always stops a powered task. A Ctrl+C before the work started is raised again (the work
     never runs)."""
     cfg, ask = cfg or load(), ask or input
-    arm = Arm(cfg, rs, speed)
+    arm = Arm(cfg, rs, speed, gripper=grip is not None)
     working, rest = False, None
     try:
         ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")
@@ -430,6 +463,9 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
         rest = start if cfg.rest is None else cfg.rest_model()
         if cfg.initial is not None:
             arm.go(cfg.initial_model())
+        if grip is not None:
+            warn = arm.open_gripper(grip)
+            print(f"CHECK: {warn}" if warn else f"gripper open ({grip:.1f} rad)", flush=True)
         working = True
         yield arm
         if cfg.initial is not None:

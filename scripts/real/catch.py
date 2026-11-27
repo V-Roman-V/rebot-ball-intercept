@@ -2,13 +2,14 @@
 
     ./rig catch                         # the camera is switched to 640x480 @ 60
 
-Before: the table map and today's arm and ball steps (./rig calibrate); open the jaw by hand (the
-gripper motor is not powered). The camera is located from the table markers (hands off them).
-ENTER powers the arm: rest -> initial pose -> the waiting pose at the intercept line; then the jaw
+Before: the table map and today's arm and ball steps (./rig calibrate). The camera is located from
+the table markers (hands off them). ENTER powers the arm: rest -> initial pose, where the gripper
+opens (--grip, motor rad; --grip 0 leaves it alone: open it by hand) -> the waiting pose at the
+intercept line; then the jaw
 follows the planner (the simulation's policy on the tracked ball). Roll the ball.
 
 Keys (window): q finish (initial pose -> rest -> release), r reset the tracker.
-Ctrl+C in the terminal holds the arm where it is; ENTER then releases it (support the arm first),
+Ctrl+C in the terminal holds the arm where it is; ENTER then takes it back to rest and releases it,
 a second Ctrl+C drops it at once and stops.
 The motors' own speed limit and current cap are the safety.
 Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
@@ -41,6 +42,8 @@ PHASES = ("home", "tracking", "arrived")
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--height", type=float, default=20.0, help="fingertips above the table at the catch, mm (default 20; the ball is 44 mm tall: above its centre, 22 mm, it may squeeze under the fingers)")
+    ap.add_argument("--grip", type=float, default=arm_mod.GRIP_OPEN,
+                    help="gripper opening for the catch, motor rad (0.1 .. 5 = open; 0 = not powered, open it by hand)")
     ap.add_argument("--joint-speed", type=float, default=1.5, help="firmware speed limit of every joint (rad/s)")
     args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
@@ -71,7 +74,7 @@ def main() -> int:
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, cam.width * 2, cam.height * 2)
     try:
-        with arm_mod.powered(speed=args.joint_speed) as arm:
+        with arm_mod.powered(speed=args.joint_speed, grip=args.grip or None) as arm:
             arm.go(planner.plan(trk, time.monotonic()).q)          # the waiting pose at the intercept line
             trk.reset()
             planner.reset()
