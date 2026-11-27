@@ -2,15 +2,11 @@
 
     ./rig move                          # 60, 35, 20 mm above the table, y from -0.20 to +0.20 m
     ./rig move --heights 40 --y 0.10 --speed 0.05
-    ./rig move --dry-run                # the plan and the route only: no CAN, nothing is powered
 
 The jaw is posed as when blocking (fingers forward, tilted down, facing the ball's side of the
 table). The heights are above the measured table plane (config/rig_map.json): check them with a
 ruler. Route: rest -> initial pose -> the passes, highest first, alternating direction -> lift ->
 initial pose -> rest, then the motors are released.
-
-Before the ENTER prompt it prints how far the joints turn from where the arm is to the initial pose
-and to the first pass (a CHECK when a joint would turn more than 120 deg).
 
 The motors' own speed limit and current cap are the safety. ENTER powers the arm; Ctrl+C holds it
 where it is, then ENTER takes it back to rest and releases it; a second Ctrl+C drops it at once and stops.
@@ -61,7 +57,6 @@ def main() -> int:
     ap.add_argument("--heights", type=float, nargs="+", default=[60, 35, 20], help="fingertip heights above the table (mm)")
     ap.add_argument("--y", type=float, default=0.20, help="the passes go from -y to +y (m)")
     ap.add_argument("--speed", type=float, default=0.10, help="mean fingertip speed along the line (m/s)")
-    ap.add_argument("--dry-run", action="store_true", help="print the plan and the route from the recorded rest pose, then stop")
     args = ap.parse_args()
     if not rc.MAP_PATH.exists():
         print("config/rig_map.json not found: run ./rig calibrate first")
@@ -86,11 +81,7 @@ def main() -> int:
         p = tip(q)
         return (p[2] - rc.plane_z(plane, p[0], p[1])) * 1000
 
-    if args.dry_run:
-        print("\n".join(arm_mod.route_lines(cfg, cfg.rest_model(), passes[0][1][0], "rest pose")) or
-              "no arm poses recorded (./rig calibrate, step 4): the route starts where the arm rests")
-        return 0
-    with arm_mod.powered(cfg, first=passes[0][1][0]) as arm:
+    with arm_mod.powered(cfg) as arm:
         for h, path in passes:
             q = arm.go(path[0])
             print(f"pass at {h * 1000:.0f} mm: start {height(q):.1f} mm above the table", flush=True)

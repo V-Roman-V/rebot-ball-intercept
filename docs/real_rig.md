@@ -136,9 +136,7 @@ face down the table: the map takes the direction from the base to the middle of 
 rounded to a quarter turn, as "down the table" (ours: the base turned 90° to the right, so the
 table lies along the arm's +y). The sweep box, the tracked area, the intercept line and the planner
 follow it. For a base that is not square to the table, write the angle as `"base_yaw_deg"` in
-`config/rig_map.json` (a new solve writes the quarter turn again). The recorded rest and initial poses hold the turn in joint 1; a target one
-whole turn away at joint 1, or half a turn at joint 6 (the two-finger gripper looks the same), is
-taken as the nearest equivalent angle, never the long way round.
+`config/rig_map.json` (a new solve writes the quarter turn again).
 
 ### Table map (steps 1-3, once)
 
@@ -247,18 +245,20 @@ the pose says: press `c`.
 ./rig move               # the jaw along the intercept line at 60, 35 and 20 mm above the table
 ./rig move --heights 60  # one high pass first
 ./rig catch              # the jaw follows the ball
-./rig move --dry-run     # (also catch) the plan and the route only: no camera, no CAN
 ```
 
 Both scripts power all six arm joints and go
 **rest → initial pose → their work → initial pose → rest**, then release the motors. Without
 recorded poses they start and end where the arm was resting.
 
-- **The route** is printed before the prompt, from where the arm really is (read only):
-  `to start: here -> initial pose (joint 2 turns most: 81 deg) -> first target (joint 1 turns most:
-  46 deg)`. A joint that would turn more than 120° gets a `CHECK` line: no planned move is that
-  large, so the recorded poses or the wrist zero are probably not today's. `--dry-run` prints the
-  same from the recorded rest pose and stops.
+- **Joint limits.** Every reading and target is the joint's angle inside its limits
+  (`LIMITS` in `eaiproject/arm.py`: the arm model's ranges for joints 1-5, e.g. ±160° at the base).
+  A motor counts whole turns, so joint 1 can read 267° while standing at -93°: a joint with stops
+  cannot turn all the way round, so its range says which angle is meant, and targets are sent in
+  the turn the motor counts. Targets beyond a limit are clipped. Moves are straight lines in joint
+  space between two poses inside the limits, so none goes the long way round or through a stop.
+  The wrist roll (joint 6) has no stop; the two-finger gripper is the same rolled half a turn, so
+  it takes the half turn nearest to where it is.
 - **ENTER** powers the arm. Before it, the arm should be at rest and the workspace clear.
 - **Ctrl+C** (in the terminal) holds the arm where it is. **ENTER** then takes it back to rest
   through the initial pose and releases it there; the task goes on to save its log. If the arm
@@ -333,7 +333,6 @@ and the screenshots you need.
 | `the camera server did not switch` | `./rig camera stop`, then the task again |
 | small markers not detected, or flickering | too small or too edge-on in the image: move the camera closer or higher, or `./rig camera hd` before the views step |
 | ball not found | tune the colour: `./rig calibrate --step ball` (drag a box around the ball) |
-| `CHECK: joint N turns ... deg` before the ENTER prompt | the arm is not near its recorded poses, or they were recorded before the gripper was remounted: `./rig calibrate --step arm`; do not power it until the route looks right |
 | the standing arm buzzes in `catch` | the damping gain on a noisy velocity reading: lower `HOLD_KD` in `eaiproject/arm.py`, or `--control position` |
 
 ## Protocol notes

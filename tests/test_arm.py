@@ -29,10 +29,17 @@ WORK = np.array([0.1, 1.2, 1.0, -0.4, 0.1, 0.2])                           # mod
 ROLL15 = np.radians([0, 0, 0, 0, 0, 15.0])                                 # the motor's zero is off by this
 
 
+def pose_diff(a, b) -> np.ndarray:
+    """a - b as arm poses: whole turns do not count (a motor may count them), nor half turns of joint 6
+    (the two-finger gripper is the same rolled half a turn)."""
+    d = np.asarray(a, float) - np.asarray(b, float)
+    d -= 2 * np.pi * np.round(d / (2 * np.pi))
+    d[5] -= np.pi * np.round(d[5] / np.pi)
+    return d
+
+
 def assert_same_pose(got, want, atol=1e-9):
-    """The same arm pose: joint 1 may differ by whole turns and joint 6 by half turns (arm.SAME_EVERY),
-    since the arm goes to the equivalent angle nearest to where it is."""
-    np.testing.assert_allclose(got, arm.nearest(want, got), atol=atol)
+    np.testing.assert_allclose(pose_diff(got, want), 0.0, atol=atol)
 
 
 def level_pose(pitch: float, yaw: float, x=0.40, y=0.05) -> np.ndarray:
@@ -96,7 +103,7 @@ class FakeBus:
         """The targets pass through `poses` (motor angles) in this order."""
         i = 0
         for t in self.targets:
-            if i < len(poses) and np.allclose(t, arm.nearest(poses[i], t), atol=1e-9):     # the same pose (see assert_same_pose)
+            if i < len(poses) and np.abs(pose_diff(t, poses[i])).max() < 1e-9:
                 i += 1
         return i == len(poses)
 
@@ -217,7 +224,7 @@ class ArmTest(unittest.TestCase):
             a.enable()
             n0 = len(bus.targets)
             reached = a.go(WORK)
-        work = arm.nearest(WORK, REST + ROLL15)                                 # the equivalent pose nearest the arm
+        work = a.cfg.within(WORK, REST + ROLL15)                                # joint 6 at the half turn nearest the arm
         np.testing.assert_allclose(reached, work)
         T = np.array(bus.targets[n0:])
         np.testing.assert_allclose(T[-1], work - ROLL15)
@@ -231,11 +238,75 @@ class ArmTest(unittest.TestCase):
         self.assertLess(step[-1], 0.2 * step.max())
 
 
+class LimitsTest(unittest.TestCase):
+    """Every joint stays inside its limits: motor readings and targets mean the angle inside the range,
+    so no move goes the long way round or through a stop."""
+    TURNED = np.radians([267.2, 0.4, 0.0, -0.1, 1.1, 211.5])                  # the rest pose of the turned base (motor)
+
+    def moves(self, start_motor, target_model, cfg=None):
+        """Motor targets of a go() from `start_motor` to `target_model`."""
+        bus = FakeBus(start_motor)
+        a = arm.Arm(cfg or arm.ArmConfig(), bus)
+        with no_sleep():
+            a.enable()
+            n0 = len(bus.targets)
+            a.go(target_model)
+        return np.array(bus.targets[n0:])
+
+    def test_limits_are_the_models(self):
+        env = BallInterceptEnv("forward")
+        np.testing.assert_allclose(arm.LIMITS[:5], np.c_[env.arm_lo, env.arm_hi][:5], atol=1e-9)
+        np.testing.assert_allclose(arm.LIMITS[5], [-4 * np.pi, 4 * np.pi])      # the wrist: the motor's count (see arm.LIMITS)
+
+    def test_a_reading_a_turn_up_is_the_angle_inside_the_limits(self):
+        q = arm.ArmConfig().to_model(self.TURNED)
+        self.assertAlmostEqual(np.degrees(q[0]), -92.8, places=6)
+        np.testing.assert_allclose(q[1:], self.TURNED[1:])                      # the wrist has no stop: the motor's count stays
+        self.assertTrue(np.all((q >= arm.LIMITS[:, 0]) & (q <= arm.LIMITS[:, 1])))
+
+    def test_the_same_pose_in_other_turns_does_not_move_the_arm(self):
+        """Joint 1 reads 267 deg and the plan says -93; joint 6 half a turn on is the same gripper."""
+        for off in ([360.0, 0, 0, 0, 0, 180.0], [0.0, 0, 0, 0, 0, -180.0], [-360.0, 0, 0, 0, 0, 360.0]):
+            T = self.moves(self.TURNED, arm.ArmConfig().to_model(self.TURNED) + np.radians(off))
+            self.assertLess(np.abs(T - self.TURNED).max(), 1e-9, off)
+
+    def test_targets_go_to_the_motor_in_the_turn_it_counts(self):
+        target = arm.ArmConfig().to_model(self.TURNED) + np.radians([30.0, 0, 0, 0, 0, 0])     # -62.8 deg at joint 1
+        T = np.degrees(self.moves(self.TURNED, target)[:, 0])
+        self.assertAlmostEqual(T[-1], 297.2, places=6)                          # not -62.8: that is a turn away for the motor
+        self.assertTrue(np.all(np.diff(T) > 0) and T[0] > 267.2)
+
+    def test_joint_1_goes_the_way_its_stop_allows(self):
+        """From +150 to -150 deg is 60 deg across the back, but the joint stops at +-160: it turns the
+        300 deg through the front."""
+        T = np.degrees(self.moves(np.radians([150.0, 30, 30, 0, 0, 0]), np.radians([-150.0, 30, 30, 0, 0, 0]))[:, 0])
+        self.assertAlmostEqual(T[-1], -150.0, places=6)
+        self.assertTrue(np.all(np.diff(T) < 0))
+        self.assertLessEqual(np.abs(T).max(), np.degrees(arm.LIMITS[0, 1]))
+
+    def test_wrist_takes_the_nearest_half_turn_inside_the_limits(self):
+        start = np.radians([0.0, 30, 30, 0, 0, 170.0])
+        for target, end in ((185.0, 185.0), (-5.0, 175.0), (95.0, 95.0), (75.0, 255.0)):     # never more than 90 deg away
+            T = np.degrees(self.moves(start, np.radians([0.0, 30, 30, 0, 0, target]))[:, 5])
+            self.assertAlmostEqual(T[-1], end, places=6, msg=target)
+        T = np.degrees(self.moves(np.radians([0.0, 30, 30, 0, 0, 710.0]), np.radians([0.0, 30, 30, 0, 0, 5.0]))[:, 5])
+        self.assertAlmostEqual(T[-1], 545.0, places=6)                          # 725 is beyond what the motor counts
+        self.assertLessEqual(T.max(), 710.0)
+
+    def test_wrist_zero_shifts_the_target_not_the_joint(self):
+        """The wrist zero (offset) says how the gripper sits on the joint; targets go to the joint's angle."""
+        cfg = arm.ArmConfig(np.radians([0, 0, 0, 0, 0, -32.8]))
+        T = np.degrees(self.moves(self.TURNED, np.radians([-92.8, 30, 30, 0, 0, 0.0]), cfg)[:, 5])   # level gripper
+        self.assertAlmostEqual(T[-1], 212.8, places=6)                          # 1.3 deg from where it is, in the motor's turn
+
+    def test_a_target_beyond_a_limit_is_clipped(self):
+        T = self.moves(np.radians([0.0, 30, 30, 0, 0, 0]), np.array([3.0, -0.5, 3.3, 2.0, -2.0, 0.0]))
+        np.testing.assert_allclose(T[-1], [2.8, -0.2, 3.14, 1.57, -1.57, 0.0], atol=1e-9)
+        self.assertTrue(np.all((T >= arm.LIMITS[:, 0] - 1e-9) & (T <= arm.LIMITS[:, 1] + 1e-9)))
+
+
 class PoweredTest(unittest.TestCase):
     CFG = arm.ArmConfig(ROLL15, REST.copy(), INIT.copy())
-
-    def setUp(self):
-        self.enterContext(redirect_stdout(io.StringIO()))                       # the route lines powered() prints
 
     def test_route_rest_initial_work_initial_rest(self):
         bus, asks = FakeBus(REST), []
@@ -246,38 +317,6 @@ class PoweredTest(unittest.TestCase):
         assert_same_pose(bus.q(), REST)
         self.assertEqual(bus.on, set())
         self.assertTrue(bus.closed)
-
-    def test_long_way_round_is_never_taken(self):
-        """A target a whole turn away at joint 1 (the rest pose reads 267 deg, the plan says -90) or half a
-        turn at joint 6 is the pose the arm is in: it does not move."""
-        rest = np.radians([267.2, 0.4, 0.0, -0.1, 1.1, 211.5])
-        bus = FakeBus(rest)
-        a = arm.Arm(arm.ArmConfig(), bus)
-        with no_sleep():
-            a.enable()
-            a.go(rest - np.radians([360.0, 0, 0, 0, 0, 180.0]))
-        T = np.array(bus.targets)
-        self.assertLess(np.abs(T - rest).max(), 1e-9)
-
-    def test_route_is_printed_before_the_enter_prompt(self):
-        bus, out, seen = FakeBus(REST), io.StringIO(), []
-        ask = lambda s: seen.append(out.getvalue())                             # what was printed when it asked
-        with no_sleep(), redirect_stdout(out), arm.powered(self.CFG, bus, ask=ask, first=WORK) as a:
-            a.go(WORK)
-        self.assertIn("to start: here -> initial pose (joint 2 turns most: 52 deg) -> first target", seen[0])
-        self.assertNotIn("CHECK", seen[0])
-
-    def test_route_counts_equivalent_angles_and_checks_a_large_turn(self):
-        rest = np.radians([267.2, 0.4, 0.0, -0.1, 1.1, 211.5])                  # motor readings of the turned base
-        cfg = arm.ArmConfig(np.zeros(6), rest, rest + np.radians([0, 80.0, 25.0, 40.0, 0, 0]))
-        first = cfg.initial_model() - np.radians([360.0 - 10.0, 0, 0, 0, 0, 180.0])   # -83 deg at joint 1: 10 deg away
-        lines = arm.route_lines(cfg, cfg.rest_model(), first, "rest pose")
-        self.assertEqual(lines, ["to start: rest pose -> initial pose (joint 2 turns most: 80 deg) -> "
-                                 "first target (joint 1 turns most: 10 deg)"])
-        lines = arm.route_lines(cfg, cfg.rest_model() + np.radians([0, 0, 0, 170.0, 0, 0]), first)
-        self.assertEqual(len(lines), 2)
-        self.assertIn("CHECK: joint 4 turns 130 deg from here to initial pose", lines[1])
-        self.assertEqual(arm.route_lines(arm.ArmConfig(), REST), [])            # no recorded pose, no target: nothing to say
 
     def test_without_poses_it_ends_where_it_started(self):
         start = INIT + 0.05

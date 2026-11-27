@@ -243,7 +243,7 @@ def main(argv: list[str]) -> int:
         print(f"unknown task '{task}'\n{__doc__}")
         return 2
     script, needs_camera = TASKS[task]
-    offline = any(a in ("-h", "--help", "--solve", "--dry-run") for a in args)   # calibrate --solve, catch --dry-run: no camera
+    offline = any(a in ("-h", "--help", "--solve") for a in args)           # calibrate --solve: no camera
     if needs_camera and not offline and not ensure_camera():
         print("no camera: see the messages above (docs/real_rig.md, troubleshooting)")
         return 1

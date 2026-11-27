@@ -1,8 +1,11 @@
 """The real arm: zero corrections and poses (outputs/calibration/arm.json), a read-only joint stream
 for the calibration, and the motors' own position mode for the powered scripts.
 
-    q_model = q_motor + offset            (per joint, rad; outside this module every angle is a MODEL angle)
+    q_model = joint angle + offset        (per joint, rad; outside this module every angle is a MODEL angle)
 
+The joint angle is the motor reading with whole turns taken off so that it lies inside the joint's
+limits (`unwind`, `LIMITS`). Targets are kept inside the limits too (`ArmConfig.within`), so a move
+between two poses never goes the long way round or through a stop.
 `offset` corrects a motor whose zero differs from the model's. Only the wrist roll (joint 6) is
 measured: with the jaw open and both fingertips resting on the table the jaw is level
 (`level_offset`). Joint 6 turns about the finger axis and the fingertip lies on that axis, so the
@@ -17,9 +20,9 @@ Two poses, stored as MOTOR readings so they stay right when the offset is measur
 Both are recorded by ./rig calibrate (step 4). The file is local (git-ignored), like the ball colour:
 the wrist zero is measured again every day, and the last values stay the defaults.
 
-Safety is the motors' own: position mode with a firmware speed limit and current cap (RAM-only
-parameter writes, gone at power-off). `powered()` asks for ENTER before enabling; Ctrl+C holds the
-arm where it is and releases it after another ENTER.
+Safety is the motors' own: position mode with a firmware speed limit and current cap, or MIT mode
+with a torque cap (RAM-only parameter writes, gone at power-off). `powered()` asks for ENTER before
+enabling; Ctrl+C holds the arm where it is, and another ENTER takes it back to rest and releases it.
 """
 from __future__ import annotations
 
@@ -71,6 +74,22 @@ HOLD_AFTER = 0.3                          # s of unchanged target before it appl
 
 
 # ------------------------------------------------------------------------------------ arm.json
+# Where each joint can be (rad), as angles of the joint itself, i.e. of the motor. Joints 1-5: the arm
+# model's ranges (assets/rebot_b601_rs/mjcf/rs_arm.xml, checked against it in tests/test_arm.py); they
+# have stops. Joint 6, the wrist roll, has none at the model's +-180 deg: on 27 Nov 2026 it ran from
+# 130 to 296 deg during the catches. Its limit is what the motor can count, +-2 turns.
+LIMITS = np.array([[-2.8, 2.8], [-0.2, 3.14], [-0.2, 3.14], [-1.57, 1.57], [-1.57, 1.57], [-4 * np.pi, 4 * np.pi]])
+
+
+def unwind(q) -> np.ndarray:
+    """Joint angles with whole turns taken off so that each lies in its joint's range (LIMITS). A motor
+    counts turns (joint 1 has read 267 deg while standing at -93 deg), but a joint with stops cannot
+    turn all the way round, so its range says which turn is meant. A joint that can (joint 6) keeps
+    the motor's count."""
+    q, mid, stops = np.array(q, float), LIMITS.mean(axis=1), np.ptp(LIMITS, axis=1) < 2 * np.pi
+    return q - 2 * np.pi * np.round((q - mid) / (2 * np.pi)) * stops
+
+
 @dataclass
 class ArmConfig:
     offset: np.ndarray = field(default_factory=lambda: np.zeros(6))     # rad, q_model = q_motor + offset
@@ -80,10 +99,26 @@ class ArmConfig:
     info: dict = field(default_factory=dict)
 
     def to_model(self, q_motor) -> np.ndarray:
-        return np.asarray(q_motor, float) + self.offset
+        """Model angles of motor readings: the joint's own angle (unwind) plus the offset."""
+        return unwind(q_motor) + self.offset
 
     def to_motor(self, q_model) -> np.ndarray:
+        """The joint's own angle for model angles (the motor may count whole turns on top: Arm.turns)."""
         return np.asarray(q_model, float) - self.offset
+
+    def within(self, q_model, ref=None) -> np.ndarray:
+        """The model pose to send for a wanted one: the same pose with every joint inside its limits.
+        Whole turns are taken off (a joint with stops has one angle for a direction); the two-finger
+        gripper is the same rolled half a turn, so with `ref` (where the arm is, model angles) joint 6
+        takes the equivalent angle nearest to it among those inside the limits; what is still outside
+        is clipped. A straight joint-space move between two such poses stays inside the limits, so no
+        move goes the long way round or through a stop."""
+        q = unwind(self.to_motor(q_model))
+        if ref is not None:
+            lo, hi = LIMITS[ROLL]
+            same = q[ROLL] + np.pi * np.arange(np.ceil((lo - q[ROLL]) / np.pi), np.floor((hi - q[ROLL]) / np.pi) + 1)
+            q[ROLL] = same[np.abs(same - self.to_motor(ref)[ROLL]).argmin()]
+        return np.clip(q, LIMITS[:, 0], LIMITS[:, 1]) + self.offset
 
     def rest_model(self) -> np.ndarray | None:
         return None if self.rest is None else self.to_model(self.rest)
@@ -314,49 +349,6 @@ def _ctrl_c_after():
         raise KeyboardInterrupt
 
 
-# Joints whose target may be any equivalent angle: joint 1 turns all the way round (360 deg), and the
-# two-finger gripper is the same rolled half a turn at joint 6 (180 deg: same fingertip point, same
-# approach, the fingers swap sides). Targets go to the equivalent nearest the arm, so a recorded pose
-# of e.g. 267 deg and a planned -90 deg mean the same place, not a 357 deg swing.
-SAME_EVERY = {0: 2 * np.pi, 5: np.pi}            # joint index -> period (rad)
-
-
-def nearest(q, ref) -> np.ndarray:
-    """`q` with joints 1 and 6 moved by whole periods to the angle nearest `ref` (model angles)."""
-    q = np.array(q, float)
-    for j, per in SAME_EVERY.items():
-        q[j] += per * np.round((ref[j] - q[j]) / per)
-    return q
-
-
-ROUTE_CHECK = np.radians(120.0)       # a joint turning more than this between two poses of the route gets a CHECK
-
-
-def route_lines(cfg: "ArmConfig", start=None, first=None, start_name: str = "here") -> list[str]:
-    """What a powered task does before its work, as text: `start` (model angles; None = not known) ->
-    the initial pose -> `first` (the first pose of the work), with the joint that turns most on each
-    leg. Every pose is taken as go() takes it: joints 1 and 6 at the equivalent angle nearest the pose
-    before. A joint turning more than ROUTE_CHECK adds a CHECK line: no planned move here is that
-    large, so the recorded poses or the wrist zero probably do not belong to the arm as it stands."""
-    stops = [] if start is None else [(start_name, np.asarray(start, float))]
-    if cfg.initial is not None:
-        stops.append(("initial pose", cfg.initial_model()))
-    if first is not None:
-        stops.append(("first target", np.asarray(first, float)))
-    if len(stops) < 2:
-        return []
-    text, checks, (name0, q0) = stops[0][0], [], stops[0]
-    for name, q in stops[1:]:
-        q = nearest(q, q0)
-        turn = np.abs(q - q0)
-        j = int(turn.argmax())
-        text += f" -> {name} (joint {j + 1} turns most: {np.degrees(turn[j]):.0f} deg)"
-        checks += [f"CHECK: joint {k + 1} turns {np.degrees(turn[k]):.0f} deg from {name0} to {name}: are the arm poses and "
-                   "the wrist zero today's (./rig calibrate, step 4)?" for k in np.flatnonzero(turn > ROUTE_CHECK)]
-        name0, q0 = name, q
-    return ["to start: " + text] + checks
-
-
 def ease(n: int) -> np.ndarray:
     """n fractions from just above 0 to 1 that start and end at rest (smoothstep)."""
     u = np.linspace(0.0, 1.0, n + 1)[1:]
@@ -383,8 +375,8 @@ class Gravity:
 class Arm:
     """The six arm motors, in the motors' position mode (control="position") or in MIT mode with the
     simulation's PD gains and gravity feed-forward (control="mit"). Angles are MODEL angles; the
-    offset is applied here, at the motor boundary. Joints 1 and 6 go to the equivalent angle nearest
-    the arm (see SAME_EVERY)."""
+    offset and the motors' whole turns are applied here, at the motor boundary. Every target is kept
+    inside the joint limits (ArmConfig.within)."""
 
     def __init__(self, cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, caps: dict | None = None,
                  gripper: bool = False, control: str = "position"):
@@ -394,7 +386,8 @@ class Arm:
         self.rs = rs if rs is not None else RobStrideBus(movable=ARM_IDS + ((GRIPPER_ID,) if gripper else ()))
         self.speed, self.caps, self.control = speed, dict(caps or CUR_CAP), control
         self.enabled, self.grip_on = False, False
-        self.last = None                                  # last target sent (model), for nearest()
+        self.last = None                                  # last target sent (model)
+        self.turns = np.zeros(6)                          # whole turns each motor counts on top of its joint's angle (rad)
         self.t_last = None                                # when it was sent (MIT speed limit)
         self.t_move = None                                # when the target last changed (MIT: HOLD_KD)
         self.ff = 1.0                                     # gravity feed-forward scale (MIT)
@@ -412,7 +405,12 @@ class Arm:
             if v is None:
                 raise ConnectionError(f"joint {m} is not answering")
             q.append(v)
+        self.turns = np.array(q) - unwind(q)
         return self.cfg.to_model(q)
+
+    def _motor(self, q) -> np.ndarray:
+        """Motor targets of a model pose, in the turn each motor counts."""
+        return self.cfg.to_motor(q) + self.turns
 
     def enable(self) -> np.ndarray:
         """Position mode, speed limit, current cap and target = where each joint is now, then power
@@ -422,7 +420,7 @@ class Arm:
             return self.enable_mit()
         with _ctrl_c_after():
             q = self.read()
-            for m, qm in zip(ARM_IDS, self.cfg.to_motor(q)):
+            for m, qm in zip(ARM_IDS, self._motor(q)):
                 self.rs.stop(m)
                 self.rs.write_param_u8(m, P_RUN_MODE, RUN_MODE_POSITION)
                 time.sleep(0.01)
@@ -470,7 +468,7 @@ class Arm:
 
     def _send_mit(self, q, kd_scale: float = 1.0) -> None:
         tau = self.ff * self.gravity(q)
-        for i, (m, v) in enumerate(zip(ARM_IDS, self.cfg.to_motor(q))):
+        for i, (m, v) in enumerate(zip(ARM_IDS, self._motor(q))):
             self.rs.mit(m, float(v), float(MIT_KP[i]), float(kd_scale * MIT_KD[i]), 0.0, float(tau[i]))
         self._flush()
 
@@ -489,7 +487,7 @@ class Arm:
         return self.cfg.to_model(q)
 
     def command(self, q) -> None:
-        q = np.asarray(q, float) if self.last is None else nearest(q, self.last)
+        q = self.cfg.within(q, self.last)
         if self.control == "mit":
             now = time.monotonic()
             if self.last is not None:
@@ -508,7 +506,7 @@ class Arm:
             self._send_mit(q, HOLD_KD if now - self.t_move > HOLD_AFTER else 1.0)
             return
         self.last = q
-        for m, v in zip(ARM_IDS, self.cfg.to_motor(q)):
+        for m, v in zip(ARM_IDS, self._motor(q)):
             self.rs.write_param_f32(m, P_LOC_REF, float(v))
 
     def hold(self) -> np.ndarray:
@@ -530,7 +528,7 @@ class Arm:
         """Straight joint-space move from where the arm is to `q`: eased, the fastest joint peaking at
         `speed` (default MOVE_SPEED), streamed at RATE. Returns the pose reached after `settle` seconds."""
         q0 = self.read()
-        q1 = nearest(q, q0)
+        q1 = self.cfg.within(q, q0)
         self.last, self.t_last = q0, None
         n = max(int(np.ceil(np.abs(q1 - q0).max() * 1.5 / (speed or MOVE_SPEED) * RATE)), 1)   # smoothstep: 1.5x the mean
         self.follow(q0 + ease(n)[:, None] * (q1 - q0))
@@ -588,13 +586,11 @@ class Arm:
 
 @contextmanager
 def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None, grip: float | None = None,
-            control: str = "position", first=None):
+            control: str = "position"):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
     `control`: "position" (the motors' position mode) or "mit" (see MIT_KP / Arm).
     Without recorded poses it starts and ends where the arm was resting. `grip` (motor rad): at the
     initial pose the gripper opens to it and stays powered until the release (None: not touched).
-    `first`: the first pose the work goes to (model angles), for the route printed before the ENTER
-    prompt (route_lines, from where the arm really is: read only).
 
     Ctrl+C (or an error) holds the arm where it is. Then ENTER takes it back to rest (through the
     initial pose) and releases it there, and the caller goes on after its `with` (saves its log); if
@@ -606,8 +602,6 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
     arm = Arm(cfg, rs, speed, gripper=grip is not None, control=control)
     working, rest = False, None
     try:
-        for line in route_lines(cfg, arm.read(), first):
-            print(line, flush=True)
         ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")
         start = arm.enable()
         rest = start if cfg.rest is None else cfg.rest_model()
