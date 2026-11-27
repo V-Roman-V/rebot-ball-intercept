@@ -149,6 +149,12 @@ class RealArm:
 
     def command(self, q, qd, kp, kd, tau) -> Feedback:
         rs = self.rs
+        # Empty the receive queue first, so that the replies read below are this cycle's. Without it
+        # every frame left over (a reply after the 4 ms wait, any other frame) stayed queued for good,
+        # and the logged feedback fell behind by ~1.2 ms per second of run (27 Nov 2026: 180 ms after
+        # 2.5 min), which a fit then explained as delay and rotor inertia.
+        while (m := rs.bus.recv(0.0)) is not None:
+            rs._handle(m)
         t_send = time.monotonic()
         for j, mid in enumerate(MOTOR_IDS):
             rs.mit(mid, float(q[j] + self.offset[j]), float(kp[j]), float(kd[j]), float(qd[j]), float(tau[j]))
