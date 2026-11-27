@@ -22,6 +22,7 @@ advice() {
     echo "     RealSense (a USB 3 port of the Mac, not a hub if possible), then start again."
   fi
 }
+if [ "$1" = "--holders" ]; then holders; exit 0; fi      # for ./rig status: the list only
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$T"
 cp "$HERE/rs_server.py" "$T/rs_server.py"

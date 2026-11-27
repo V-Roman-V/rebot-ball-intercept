@@ -23,6 +23,8 @@ from __future__ import annotations
 import signal
 import sys
 signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -119,6 +121,16 @@ def ensure_camera() -> bool:
     return start_camera(VGA)
 
 
+def camera_holders() -> str:
+    """Apps other than our server that have the RealSense open ('' when none): see start_camera.sh."""
+    return subprocess.run(["bash", str(HERE / "start_camera.sh"), "--holders"], capture_output=True, text=True).stdout.strip()
+
+
+def not_today(when: str | None) -> str:
+    """A note for a saved time 'YYYY-MM-DD ...' that is not today's (the daily steps of ./rig calibrate)."""
+    return "" if not when or when[:10] == time.strftime("%Y-%m-%d") else "  <- CHECK: not today's"
+
+
 def can_adapter() -> str:
     usb = subprocess.run(["ioreg", "-p", "IOUSB", "-l", "-w0"], capture_output=True, text=True).stdout
     lib = (Path.home() / "lib" / "libPCBUSB.dylib").exists()
@@ -160,9 +172,13 @@ def arm_states() -> int:
 def status() -> int:
     from eaiproject import arm as arm_mod
     from eaiproject import rig_calib as rc
-    from eaiproject.real_intercept import hsv_saved_time
+    from eaiproject.real_intercept import hsv_ok, hsv_saved_time, load_hsv
     cur = camera_mode()
     print(f"camera   {'server running at ' + fmt(cur) if cur else 'server not running (./rig camera start)'}")
+    held = camera_holders()
+    if held:
+        print(f"         CHECK: the camera is also open in: {held}. Quit it (Cmd+Q) and replug the camera if frames stop "
+              "or the server does not start")
     print(f"CAN      {can_adapter()}  (./rig arm reads the joints)")
     if rc.MAP_PATH.exists():
         m = rc.RigMap.load(rc.MAP_PATH)
@@ -171,17 +187,26 @@ def status() -> int:
               f"(far: {[k for k in m.markers if m.is_far(k)]}), reprojection {m.stats.get('reproj_rms_px')} px, "
               f"touches {m.stats.get('touch_xy_rms_mm')} mm in the plane, {len(m.warnings)} warning(s)")
         print(f"         table on the intercept line {line[0]:.1f} / {line[1]:.1f} / {line[2]:.1f} mm (right / centre / left)")
+        yaw = m.frame.yaw_deg
+        print(f"         base on the table: " + ("facing down the table" if yaw == 0 else
+              f"turned {abs(yaw):.0f} deg to the {'right' if yaw < 0 else 'left'}"))
     else:
         print("map      none: ./rig calibrate")
     cfg = arm_mod.load()
     if cfg.time:
         rec = [n for n, q in (("rest", cfg.rest), ("initial", cfg.initial)) if q is not None]
         print(f"arm      wrist zero {np.degrees(cfg.offset[arm_mod.ROLL]):+.1f} deg "
-              f"({cfg.info.get('level_time', 'not measured')}), poses: {', '.join(rec) or 'none'}")
+              f"({cfg.info.get('level_time', 'not measured')}), poses: {', '.join(rec) or 'none'}"
+              f"{not_today(cfg.info.get('level_time'))}")
     else:
         print("arm      no wrist zero, no poses (./rig calibrate, step 4): the powered tasks start and end where the arm rests")
     when = hsv_saved_time()
-    print(f"ball     colour {'saved ' + when if when else 'default (./rig calibrate, step 5)'}")
+    with contextlib.redirect_stdout(io.StringIO()) as note:      # load_hsv prints its CHECK when the saved range is unusable
+        lo, hi = load_hsv()
+    print(f"ball     colour {'saved ' + when if when else 'default (./rig calibrate, step 5)'}: lo {tuple(lo)} hi {tuple(hi)}"
+          f"{not_today(when) if hsv_ok(lo, hi) and not note.getvalue() else ''}")
+    if note.getvalue():
+        print(f"         {note.getvalue().strip()}")
     sess = rc.latest_session()
     if sess is not None:
         n_v = len(json.loads((sess / "views.json").read_text())["views"]) if (sess / "views.json").exists() else 0
