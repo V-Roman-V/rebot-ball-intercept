@@ -57,8 +57,15 @@ mkdir -p ~/lib && cp PCBUSB/libPCBUSB.0.13.dylib ~/lib/ && ln -sf ~/lib/libPCBUS
   camera runs as a small frame server (`scripts/real/rs_server.py`) from `~/realsense_tools`, with
   its own venv. `scripts/real/start_camera.sh` sets that up on first use and starts the server with
   a macOS password dialog. `./rig` calls it when a task needs the camera.
-- The scripts switch the running server between 1280x720 @ 30 (calibration views) and 640x480 @ 60
-  (tracking) without a password.
+- The server starts at 640x480 @ 60, the size every task works at. `./rig camera hd` switches the
+  running server to 1280x720 @ 30 without a password (small markers read better in the views step),
+  `./rig camera vga` back. No task switches to 1280x720 by itself: every switch restarts the camera
+  stream, and macOS's camera service has crashed on that and frozen the Mac (27 Nov 2026).
+- Only one program can have the camera. A browser or a call app that opened it (even in a background
+  tab) leaves the server without frames. `./rig status` and the server start name the app: quit it
+  with Cmd+Q, replug the camera, start again.
+- A server stuck in the camera library ends itself after 45 s, so the camera is not left held; its
+  log (`~/realsense_tools/rs_server.log`) then says `Timeout` and where it hung.
 - Use `pyrealsense2-macosx==2.54.2`; 2.56.5 segfaults when it lists devices.
 - The colour stream only delivers frames while the depth stream is also enabled. The server does this.
 
@@ -67,7 +74,7 @@ mkdir -p ~/lib && cp PCBUSB/libPCBUSB.0.13.dylib ~/lib/ && ln -sf ~/lib/libPCBUS
 ```bash
 ./rig status             # camera server, CAN adapter, table map, arm poses, ball colour
 ./rig camera start       # also: stop, hd (1280x720), vga (640x480)
-./rig view               # the camera with the table markers, for aiming it
+./rig view               # the camera with the table markers, for aiming it (b saves a burst of frames)
 ./rig arm                # joint states, read only: does the arm answer on CAN?
 ./rig calibrate          # the table map once; daily: wrist zero, arm poses, ball colour
 ./rig check              # live check of the calibration
@@ -80,10 +87,14 @@ mkdir -p ~/lib && cp PCBUSB/libPCBUSB.0.13.dylib ~/lib/ && ln -sf ~/lib/libPCBUS
 Options after the task go to its script: `./rig calibrate --solve`, `./rig move --heights 40`,
 `./rig catch --help`.
 
+`./rig status` is the check before a session. Besides the states it prints `CHECK` notes for: an
+app that has the camera open, a wrist zero or ball colour that was not saved today, and a saved ball
+colour that can match nothing. It also says how the map has the base turned on the table.
+
 **Ctrl+C** in the terminal stops any task like `q` or closing its window: what the window saves on
 `q` is saved, and nothing is printed but `stopped (Ctrl+C)` when it comes during the start-up. A
-second Ctrl+C stops at once. In the powered tasks the first Ctrl+C holds the arm and a second one
-drops it and stops (below). Ctrl+C alone always stops a task.
+second Ctrl+C stops at once. In the powered tasks the first Ctrl+C holds the arm, ENTER then takes
+it back to rest, and a second Ctrl+C drops it and stops (below). Ctrl+C alone always stops a task.
 
 ## Calibration
 
@@ -119,6 +130,16 @@ red `CHECK:` line saying what is weak (`u` undoes it). The solve and camera loca
 way: they refuse only when nothing can be computed (no marker in view, no marker with two touched
 corners), and otherwise warn.
 
+**A base turned on the table.** The tasks work in table axes: x down the table from the arm base,
+y to the left, the intercept line across the table at x = 0.40 m. The arm base does not have to
+face down the table: the map takes the direction from the base to the middle of the markers,
+rounded to a quarter turn, as "down the table" (ours: the base turned 90° to the right, so the
+table lies along the arm's +y). The sweep box, the tracked area, the intercept line and the planner
+follow it. For a base that is not square to the table, write the angle as `"base_yaw_deg"` in
+`config/rig_map.json` (a new solve writes the quarter turn again). The recorded rest and initial poses hold the turn in joint 1; a target one
+whole turn away at joint 1, or half a turn at joint 6 (the two-finger gripper looks the same), is
+taken as the nearest equivalent angle, never the long way round.
+
 ### Table map (steps 1-3, once)
 
 **1 Views.** Arm and hands away from the markers. Put the camera somewhere, wait until it is still,
@@ -126,6 +147,13 @@ SPACE (30 frames are averaged). Move it and repeat: at least 5 views, better 6-8
 right and front, low (about 30°) to high (about 60°), near and far. Best with 3 or more markers in
 each view and the camera still (corners steady within 0.5 px while averaging). A view that does not
 link to a touched marker is left out of the solve, with a warning.
+
+Each marker's outline shows how often it was read in the last frames (green from 70 %, yellow
+below). A small or far marker flickers: at 640x480 a marker 20-28 px wide is read in some frames
+only. It still counts for the view when read in 30 % of the 30 frames (the median corner is used),
+with a `CHECK` note below 70 %. For steadier readings move the camera closer, or run
+`./rig camera hd` before `./rig calibrate`. In `./rig view`, `b` saves 60 raw frames to
+`outputs/frames/<time>/` for tuning the detection offline.
 
 **2 Touch.** The window circles one corner in yellow (TL, TR, BR, BL; TL has the filled dot). Rest
 the **closed** fingertips on exactly that corner, pressed on the table, hold still, SPACE. Any
@@ -171,17 +199,20 @@ ENTER keeps what is saved. Saved to `outputs/calibration/arm.json` (local, like 
    table, clear of the markers and the camera, SPACE. The powered tasks pass through it on the way
    to their work and back.
 
-**5 Ball.** The camera switches to the tracking size. Put the ball **alone** on the table, still,
-hands away, `a` tunes the colour. Roll it: the green ring must follow it, the mask (bottom right)
-must show only the ball. The sliders in the "ball colour" window fine-tune it (raise S lo / V lo if
-the table or skin shows up, lower them if the ball breaks up in shadow). Leaving the step saves a
-changed colour to `outputs/calibration/ball_hsv.json`.
+**5 Ball.** The camera switches to the tracking size. Put the ball on the table, still, and drag a
+box around it with the mouse (or click on it): the colour range is taken from the pixels inside
+(the magenta ellipse shows which). `a` tunes it without the mouse, for a ball **alone** on the table,
+hands away. Roll it: the green ring must follow it, the mask (bottom right) must show only the ball.
+The sliders in the "ball colour" window fine-tune it (raise S lo / V lo if the table or skin shows
+up, lower them if the ball breaks up in shadow). Leaving the step saves a changed colour to
+`outputs/calibration/ball_hsv.json`. A range with a low limit above its high limit matches nothing:
+the step shows it in red and does not save it.
 
 ## Checks and shadow tracking
 
 ```bash
 ./rig check --label camA   # live check, arm unpowered (or off)
-./rig track                # ball tracking, arm not powered
+./rig track                # ball tracking, arm not powered (--height as for ./rig catch)
 ```
 
 Both locate the camera from the markers when they start (hands and arm off the markers for a
@@ -195,7 +226,8 @@ the tracked ball against known points (marker centres, and spots added with `t`)
 `outputs/calibration/validation.csv`, `s` saves a screenshot.
 
 `./rig track` shows the detection, the track, the predicted crossing of the intercept line, where
-the jaw would go, and a render of the pose the planner would command. Each roll is scored: the
+the jaw would go, and a render of the pose the planner would command (drawn with the table in
+front of the arm, whatever the base's turn). Each roll is scored: the
 crossing predicted 0.5 / 0.3 / 0.15 s before the line against where the ball really crossed (the
 open jaw catches within about ±28 mm). A red **CAMERA MOVED?** means the markers no longer sit where
 the pose says: press `c`.
@@ -215,35 +247,62 @@ the pose says: press `c`.
 ./rig move               # the jaw along the intercept line at 60, 35 and 20 mm above the table
 ./rig move --heights 60  # one high pass first
 ./rig catch              # the jaw follows the ball
+./rig move --dry-run     # (also catch) the plan and the route only: no camera, no CAN
 ```
 
-Both scripts power all six arm joints in the motors' own position mode and go
+Both scripts power all six arm joints and go
 **rest → initial pose → their work → initial pose → rest**, then release the motors. Without
 recorded poses they start and end where the arm was resting.
 
+- **The route** is printed before the prompt, from where the arm really is (read only):
+  `to start: here -> initial pose (joint 2 turns most: 81 deg) -> first target (joint 1 turns most:
+  46 deg)`. A joint that would turn more than 120° gets a `CHECK` line: no planned move is that
+  large, so the recorded poses or the wrist zero are probably not today's. `--dry-run` prints the
+  same from the recorded rest pose and stops.
 - **ENTER** powers the arm. Before it, the arm should be at rest and the workspace clear.
-- **Ctrl+C** (in the terminal) holds the arm where it is. **Support the arm**, then ENTER releases
-  it: joints 2 and 3 drop when released. A **second Ctrl+C** releases it at once (the arm drops)
+- **Ctrl+C** (in the terminal) holds the arm where it is. **ENTER** then takes it back to rest
+  through the initial pose and releases it there; the task goes on to save its log. If the arm
+  cannot move (the bus is lost), it says so: support the arm, and ENTER releases it where it is.
+  A **second Ctrl+C**, at the prompt or on the way back, releases it at once (joints 2 and 3 drop)
   and stops the task. Ctrl+C at the first prompt powers nothing. Enabling, holding and releasing
   are never cut halfway by a Ctrl+C: it takes effect right after. An error holds and asks the
   same way.
-- The protection is the motors' own: a firmware speed limit (0.8 rad/s; `catch --joint-speed`,
-  default 1.5) and a current cap per joint (6 / 18 / 14 / 5 / 4 / 4 A), written to RAM before
-  enabling (gone at power-off; nothing goes to the motors' flash). There are no software stop
-  checks: keep a hand near the arm's power switch.
+- The protection is the motors' own, written to RAM before enabling (gone at power-off; nothing
+  goes to the motors' flash). Position mode: a speed limit (0.8 rad/s in `move`) and a current cap
+  per joint (6 / 18 / 14 / 5 / 4 / 4 A). MIT mode: a torque cap per joint (20 / 20 / 20 / 7 / 7 /
+  7 Nm), set back when the arm is released. There are no software stop checks: keep a hand near the
+  arm's power switch.
 
-`./rig move` poses the jaw as when blocking and passes it along the intercept line (x = 0.40 m),
+`./rig move` (position mode) poses the jaw as when blocking and passes it along the intercept line,
 highest first, alternating direction, then lifts before going back. It prints the fingertip's
 height above the table at the start and end of each pass: check it with a ruler.
 
-`./rig catch` locates the camera, then after ENTER waits at the intercept line and follows the
-planner on the tracked ball, one target per camera frame. Open the jaw by hand first (the gripper
-motor is not powered). `q` in the window finishes, `r` resets the tracker. Commands and ball states
-are saved to `outputs/hardware/catch_<time>.npz`.
+`./rig catch` locates the camera, then after ENTER goes to the initial pose, opens the gripper,
+waits at the intercept line and follows the planner on the tracked ball, one target per camera
+frame. `q` in the window finishes, `r` resets the tracker and brings the jaw back to the middle.
+Commands, ball states and the measured joint angles are saved to
+`outputs/hardware/catch_<time>.npz`.
 
-The planner (`eaiproject/real_intercept.py`) is the simulation's policy in real time: straight-line
-crossing prediction, the jaw facing the ball, rate limits on the jaw pose (0.6 m/s sideways), IK in
-the MuJoCo model, heights from the measured table plane.
+| option of `catch` | default | meaning |
+|---|---|---|
+| `--height` | 20 | fingertips above the table at the catch, mm. The ball is 44 mm tall: above its centre (22 mm) it may squeeze under the fingers |
+| `--grip` | 4.5 | gripper opening, motor rad (0 closed .. 5 open). `0`: the gripper is not powered, open it by hand |
+| `--joint-speed` | 3.0 | fastest joint motion the planner asks for, rad/s. The arm's own limit is set 25 % above it, as a backstop |
+| `--control` | `mit` | `mit`: the motors' MIT mode with the simulation's PD gains and gravity feed-forward. `position`: the motors' own position loop |
+
+**MIT control** is the controller of the system-identification run, so the simulation parameters
+fitted there describe the arm as `catch` drives it; on the rig it moved without the shaking of the
+position mode. While the target stands still for 0.3 s the damping gain drops to 30 %: at the full
+gain the motors' noisy velocity reading made the standing arm buzz (`HOLD_KD` in `eaiproject/arm.py`).
+
+The planner (`eaiproject/real_intercept.py`) is the simulation's policy in real time: the crossing
+point from the tracker's straight line, the arrival time with a rolling ball's slowdown
+(0.20 m/s²), the jaw facing the ball, rate limits on the jaw pose (0.6 m/s sideways), IK in the
+MuJoCo model, heights from the measured table plane. A step along the line is shortened when a
+joint would have to turn faster than `--joint-speed`, so every target is a pose on the line at the
+planned height: a speed limit that cut the targets joint by joint made the fingertips dip into the
+table. The ball's speed and direction are estimated in the table plane only; a hop shows up as a
+small shift away from the camera (about the hop's height), not as a change of height.
 
 ## Validation experiment
 
@@ -268,11 +327,14 @@ and the screenshots you need.
 |---|---|
 | `No motor answered` / `transmit queue is full` / joints not answering | arm power off, or the CAN cable is not connected |
 | `PcanCanInitializationError ... handle is invalid` | the PCAN-USB adapter is unplugged |
-| camera server: `failed to set power state` | another program holds the camera: quit video apps, replug the camera, start again. A stuck earlier server is killed by `start_camera.sh` itself |
+| camera server: `failed to set power state`, or it starts and no frames come | another program holds the camera, often a browser: the start prints `The camera is held by: ...`. Quit it (Cmd+Q), replug the camera, start again. A stuck earlier server is killed by `start_camera.sh` itself |
+| the Mac freezes when the camera changes size | macOS's camera service crashed on the stream restart. Restart the Mac; stay at 640x480 (no `./rig camera hd`) |
 | camera server: `Frame didn't arrive` | the camera re-enumerated: replug it, `./rig camera stop`, start again |
 | `the camera server did not switch` | `./rig camera stop`, then the task again |
-| small markers not detected | too small or too edge-on in the image: move the camera closer or higher |
-| ball not found | tune the colour: `./rig calibrate --step ball` |
+| small markers not detected, or flickering | too small or too edge-on in the image: move the camera closer or higher, or `./rig camera hd` before the views step |
+| ball not found | tune the colour: `./rig calibrate --step ball` (drag a box around the ball) |
+| `CHECK: joint N turns ... deg` before the ENTER prompt | the arm is not near its recorded poses, or they were recorded before the gripper was remounted: `./rig calibrate --step arm`; do not power it until the route looks right |
+| the standing arm buzzes in `catch` | the damping gain on a noisy velocity reading: lower `HOLD_KD` in `eaiproject/arm.py`, or `--control position` |
 
 ## Protocol notes
 
@@ -288,9 +350,10 @@ RobStride private CAN protocol, 29-bit extended IDs, comm type in bits 24-28 (`e
 Scaling: position ±4π rad. RS06: ±50 rad/s, ±36 Nm, kp 0-5000, kd 0-100. RS00: ±33 rad/s, ±14 Nm,
 kp 0-500, kd 0-5. The torque ranges match the motors' own `limit_torque` parameter.
 
-Useful parameters: 0x7005 run_mode (0 MIT, 1 position), 0x7016 loc_ref, 0x7017 limit_spd,
-0x7018 limit_cur, 0x7019 mechPos, 0x701A iqf, 0x701B mechVel, 0x701C VBUS.
+Useful parameters: 0x7005 run_mode (0 MIT, 1 position), 0x700B limit_torque, 0x7016 loc_ref,
+0x7017 limit_spd, 0x7018 limit_cur, 0x7019 mechPos, 0x701A iqf, 0x701B mechVel, 0x701C VBUS.
 The gripper travel is 0 (closed) to 5.0 rad (open), from Seeed's config.
 
 `RobStrideBus(movable=...)` refuses enable / command / parameter writes to any motor not listed:
-the calibration and check tools open it with `movable=()`, the powered tasks with the six arm joints.
+the calibration and check tools open it with `movable=()`, the powered tasks with the six arm joints
+(`catch` also with the gripper).

@@ -72,7 +72,7 @@ Everything runs through `./rig`. The full guide, including the macOS-specific ca
 is in [docs/real_rig.md](docs/real_rig.md).
 
 ```bash
-./rig status             # camera server, CAN adapter, table map, arm poses, ball colour
+./rig status             # camera server, CAN adapter, table map, arm poses, ball colour: run it first
 ./rig arm                # joint states, read only
 ./rig view               # the camera with the table markers, for aiming it
 ./rig calibrate          # the table map once (markers + fingertip touches + sweep); daily: wrist zero, ball colour
@@ -89,6 +89,9 @@ written to `outputs/`, which is git-ignored.
 
 About 40 minutes from bare table to catching. Before you start: arm power on (the motors stay
 off), the PCAN-USB adapter plugged in, the camera on a USB 3 port of the Mac, the gripper mounted.
+Quit browsers and call apps: one that has the camera open leaves the server without frames
+(`./rig status` names it). The arm base may stand turned on the table (ours is turned 90° to the
+right): the map works out the turn from where the markers lie, nothing to set.
 
 1. **Markers.** Tape the 4 ArUco markers flat on the table: at least 2 within the arm's reach (they
    get touched), at least 1 more than 0.5 m from the arm base, not in a line, spread out. Keep a
@@ -109,8 +112,9 @@ off), the PCAN-USB adapter plugged in, the camera on a USB 3 port of the Mac, th
      SPACE, then again at another spot (this is the wrist zero). `n` → **rest**: fold the arm onto
      itself, let go, SPACE. `n` → **initial**: hold the arm above the table, clear of the markers,
      SPACE. ENTER.
-   - *5 Ball:* the ball alone on the table, hands away, `a`. Roll it: the ring must follow it and the
-     mask must show only the ball. ENTER saves and closes.
+   - *5 Ball:* the ball alone on the table, hands away; drag a box around it with the mouse (or
+     `a`). Roll it: the ring must follow it and the mask must show only the ball. ENTER saves and
+     closes.
 5. **Commit the map:** `git add config/rig_map.json && git commit -m "Table map: new marker layout"`.
 6. **Simple tests**, arm unpowered:
    - `./rig check`: hands off the markers for the first second. Rest the closed fingertips on a
@@ -118,15 +122,17 @@ off), the PCAN-USB adapter plugged in, the camera on a USB 3 port of the Mac, th
    - `./rig track`: roll the ball a few times. The predicted crossing should land where the ball
      crosses the line; `q` prints the prediction error over the rolls (the open jaw catches within
      ±28 mm).
-7. **Powered tests:** `./rig move --heights 60`, ENTER powers the arm, and the jaw passes along the
-   intercept line 60 mm above the table: check the printed height with a ruler. Then `./rig move`
-   for 60 / 35 / 20 mm.
-8. **Catch:** `./rig catch`. Wait for `camera located: OK`, open the jaw by hand, press ENTER in the
-   terminal: the arm goes from rest to the initial pose and waits at the intercept line. Roll the
-   ball. `q` in the window brings the arm back to rest and releases it.
+7. **Powered tests:** `./rig move --heights 60`. It prints how far each joint turns on the way to
+   the first pass (`--dry-run` prints that and stops); ENTER powers the arm, and the jaw passes
+   along the intercept line 60 mm above the table: check the printed height with a ruler. Then
+   `./rig move` for 60 / 35 / 20 mm.
+8. **Catch:** `./rig catch`. Wait for `camera located: OK`, press ENTER in the terminal: the arm goes
+   from rest to the initial pose, opens the gripper and waits at the intercept line. Roll the ball.
+   `q` in the window brings the arm back to rest and releases it.
 
-**Next days, same markers:** `./rig calibrate` opens at step 4. Redo the wrist level (the gripper
-is remounted daily), press ENTER through the rest, then `./rig catch`. If the camera was moved, there
+**Next days, same markers:** `./rig status` (it marks a wrist zero or ball colour that is not
+today's), then `./rig calibrate`, which opens at step 4. Redo the wrist level (the gripper is
+remounted daily), press ENTER through the rest, then `./rig catch`. If the camera was moved, there
 is nothing to redo: every task locates it from the markers when it starts.
 
 Ctrl+C in the terminal stops any task, like `q`. Details and troubleshooting:
@@ -135,10 +141,11 @@ Ctrl+C in the terminal stops any task, like `q`. Details and troubleshooting:
 ### Safety
 
 The calibration and check tools open the CAN bus read-only: the wrapper refuses enable, command and
-parameter writes to any motor not allowed. The powered tasks use the motors' own position mode with
-a firmware speed limit and current cap, and ask for ENTER before powering. Ctrl+C holds the arm
-where it is: support it and press ENTER to release it, or press Ctrl+C again to release it at once.
-Joints 2 and 3 carry the arm's weight and drop when released. See
+parameter writes to any motor not allowed. The powered tasks ask for ENTER before powering and rely
+on limits kept in the motors: `move` uses their position mode with a speed limit and current cap,
+`catch` their MIT mode with a torque cap (`--control position` for the position mode). Ctrl+C holds
+the arm where it is; ENTER then takes it back to its rest pose and releases it there, and a second
+Ctrl+C releases it at once. Joints 2 and 3 carry the arm's weight and drop when released. See
 [docs/real_rig.md#powered-runs](docs/real_rig.md#powered-runs).
 
 ## How it works
@@ -146,11 +153,13 @@ Joints 2 and 3 carry the arm's weight and drop when released. See
 1. **Tracking.** The ball is found by an HSV colour threshold inside the calibrated table area. Its
    centroid is projected onto the plane of the ball centre and filtered by a constant-velocity Kalman
    filter with real frame timestamps. No learned detector; about 1-2 ms per frame.
-2. **Prediction.** A straight-line extrapolation gives where and when the ball crosses the intercept
-   line (x = 0.40 m from the arm base).
+2. **Prediction.** A straight-line extrapolation gives where the ball crosses the intercept line
+   (0.40 m down the table from the arm base); the arrival time counts the slowdown of a rolling
+   ball (0.20 m/s², measured on the rig).
 3. **Planning.** The open jaw (fingertips 20 mm above the table, tilted 30° down, turned to face the
    ball) is moved along the line with rate limits. Damped least-squares IK in the MuJoCo model gives
-   the joint targets.
+   the joint targets. On the real arm a step along the line is shortened when a joint would have to
+   turn faster than its limit, so every target stays a pose on the line at the planned height.
 4. **Calibration (real rig).** A one-time table map holds the ArUco markers and the table plane in
    the arm's frame, fitted to camera views, fingertip touches on marker corners and a fingertip sweep
    of the table. Heights measured with the arm's own readings cancel its model's height bias. The

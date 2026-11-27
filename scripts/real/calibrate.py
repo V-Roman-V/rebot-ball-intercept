@@ -20,8 +20,9 @@ without the arm too: steps 2-4 say ARM NOT CONNECTED until it answers, then work
   4 ARM     WRIST LEVEL (the gripper is remounted every day): both fingertips of the open jaw on the
             table, SPACE, at two spots. REST and INITIAL poses only when they should change.
                                             SPACE record, n / p next / previous part, u undo
-  5 BALL    Ball colour at the tracking resolution: ball alone on the table, a = auto-tune, roll it
-            and watch the mask. Sliders fine-tune.   u back to the saved colour, c locate camera
+  5 BALL    Ball colour at the tracking resolution: drag a box around the ball with the mouse (or
+            a = auto-tune, ball alone on the table), roll it and watch the mask. Sliders fine-tune.
+                                                     u back to the saved colour, c locate camera
 
 ENTER next step, BACKSPACE previous, 1-5 jump, q quit. Everything is saved as it is recorded.
 """
