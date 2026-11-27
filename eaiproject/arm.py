@@ -50,6 +50,19 @@ RATE = 50.0                               # Hz, go() streams its targets at this
 GRIP_OPEN = 4.5                           # motor rad: gripper opened for the catch (travel 0 closed .. 5 open)
 GRIP_SPEED, GRIP_CUR = 2.0, 2.0           # rad/s, A: the gripper's firmware speed limit and current cap
 
+# MIT control (Arm(control="mit")): the motors' MIT mode with the simulation's PD gains and the model's
+# gravity as feed-forward, as in BallInterceptEnv and the system-identification run (scripts/sysid), so
+# a fitted sim_params.json describes the arm under this controller. MIT mode has no firmware speed
+# limit: each target is limited to `speed` (rad/s) here instead. The torque cap is the motors'
+# limit_torque, written for the run and restored on release.
+RUN_MODE_MIT = 0
+P_LIMIT_TORQUE = 0x700B                   # Nm (checked on this arm's firmware by the sysid run, 27 Nov)
+MIT_KP = np.array([80.0, 100.0, 100.0, 35.0, 25.0, 18.0])
+MIT_KD = np.array([8.0, 10.0, 10.0, 4.0, 3.0, 2.5])
+TORQUE_CAP = np.array([20.0, 20.0, 20.0, 7.0, 7.0, 7.0])     # Nm, as in the sysid run
+MOTOR_TORQUE_MAX = np.array([36.0, 36.0, 36.0, 14.0, 14.0, 14.0])
+FF_RAMP = 1.0                             # s, gravity feed-forward ramps in after power-on
+
 
 # ------------------------------------------------------------------------------------ arm.json
 @dataclass
@@ -316,19 +329,42 @@ def ease(n: int) -> np.ndarray:
     return u * u * (3 - 2 * u)
 
 
+class Gravity:
+    """Gravity torques of the arm model (N m per joint) at model angles q, zero velocity."""
+
+    def __init__(self):
+        import mujoco
+        from .ball_intercept_env import BallInterceptEnv
+        env = BallInterceptEnv("forward")
+        self.mj, self.m, self.qadr, self.dadr = mujoco, env.model, env.arm_qadr, env.arm_dadr
+        self.d = mujoco.MjData(self.m)
+
+    def __call__(self, q) -> np.ndarray:
+        self.d.qpos[self.qadr] = q
+        self.d.qvel[:] = 0.0
+        self.mj.mj_forward(self.m, self.d)
+        return self.d.qfrc_bias[self.dadr].copy()
+
+
 class Arm:
-    """The six arm motors in the motors' position mode. Angles are MODEL angles; the offset is
-    applied here, at the motor boundary. Joints 1 and 6 go to the equivalent angle nearest the arm
-    (see SAME_EVERY)."""
+    """The six arm motors, in the motors' position mode (control="position") or in MIT mode with the
+    simulation's PD gains and gravity feed-forward (control="mit"). Angles are MODEL angles; the
+    offset is applied here, at the motor boundary. Joints 1 and 6 go to the equivalent angle nearest
+    the arm (see SAME_EVERY)."""
 
     def __init__(self, cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, caps: dict | None = None,
-                 gripper: bool = False):
+                 gripper: bool = False, control: str = "position"):
         from .robstride import RobStrideBus
+        assert control in ("position", "mit"), control
         self.cfg = cfg or load()
         self.rs = rs if rs is not None else RobStrideBus(movable=ARM_IDS + ((GRIPPER_ID,) if gripper else ()))
-        self.speed, self.caps = speed, dict(caps or CUR_CAP)
+        self.speed, self.caps, self.control = speed, dict(caps or CUR_CAP), control
         self.enabled, self.grip_on = False, False
         self.last = None                                  # last target sent (model), for nearest()
+        self.t_last = None                                # when it was sent (MIT speed limit)
+        self.ff = 1.0                                     # gravity feed-forward scale (MIT)
+        self.torque_orig: dict[int, float] = {}           # limit_torque before the run (MIT), restored on release
+        self.gravity = Gravity() if control == "mit" else None
 
     def read(self) -> np.ndarray:
         q = []
@@ -345,7 +381,10 @@ class Arm:
 
     def enable(self) -> np.ndarray:
         """Position mode, speed limit, current cap and target = where each joint is now, then power
-        on. Returns the (model) pose it holds. Runs whole: a Ctrl+C meanwhile comes right after."""
+        on (MIT: see enable_mit). Returns the (model) pose it holds. Runs whole: a Ctrl+C meanwhile
+        comes right after."""
+        if self.control == "mit":
+            return self.enable_mit()
         with _ctrl_c_after():
             q = self.read()
             for m, qm in zip(ARM_IDS, self.cfg.to_motor(q)):
@@ -364,8 +403,66 @@ class Arm:
                 self.rs.enable(m)
         return q
 
+    def enable_mit(self) -> np.ndarray:
+        """MIT mode, torque cap, a hold at where each joint is now (gravity feed-forward off), power on,
+        then the feed-forward ramps in over FF_RAMP. Runs whole."""
+        with _ctrl_c_after():
+            q = self.read()
+            for i, m in enumerate(ARM_IDS):
+                self.rs.stop(m)
+                self.rs.write_param_u8(m, P_RUN_MODE, RUN_MODE_MIT)
+                time.sleep(0.01)
+                if self.rs.read_param_u8(m, P_RUN_MODE) != RUN_MODE_MIT:
+                    raise RuntimeError(f"joint {m} did not switch to MIT mode")
+                lt = self.rs.read_param_f32(m, P_LIMIT_TORQUE)
+                if lt is None or not 0.3 * MOTOR_TORQUE_MAX[i] <= lt <= 1.01 * MOTOR_TORQUE_MAX[i]:
+                    raise RuntimeError(f"joint {m}: limit_torque reads {lt}, not a plausible torque limit")
+                self.torque_orig[m] = lt
+                self.rs.write_param_f32(m, P_LIMIT_TORQUE, float(TORQUE_CAP[i]))
+            self.last, self.t_last, self.ff = q, None, 0.0
+            self._send_mit(q)                            # the hold target goes first
+            self.enabled = True
+            for m in (6, 5, 4, 1, 3, 2):                 # the joints carrying the arm last
+                self.rs.enable(m)
+            t0 = time.monotonic()
+            while (s := (time.monotonic() - t0) / FF_RAMP) < 1.0:
+                self.ff = 0.5 - 0.5 * np.cos(np.pi * s)
+                self._send_mit(q)
+                time.sleep(1.0 / RATE)
+            self.ff = 1.0
+            self._send_mit(q)
+        return q
+
+    def _send_mit(self, q) -> None:
+        tau = self.ff * self.gravity(q)
+        for i, (m, v) in enumerate(zip(ARM_IDS, self.cfg.to_motor(q))):
+            self.rs.mit(m, float(v), float(MIT_KP[i]), float(MIT_KD[i]), 0.0, float(tau[i]))
+        self._flush()
+
+    def _flush(self) -> None:
+        """Take the motors' replies off the bus (MIT: one feedback frame per command)."""
+        bus = getattr(self.rs, "bus", None)
+        if bus is None:
+            return
+        while (msg := bus.recv(0.0)) is not None:
+            self.rs._handle(msg)
+
+    def measured(self) -> np.ndarray:
+        """Model angles from the motors' latest MIT feedback (NaN where none came yet)."""
+        fb = getattr(self.rs, "last_fb", {})
+        q = np.array([fb[m].pos if m in fb else np.nan for m in ARM_IDS])
+        return self.cfg.to_model(q)
+
     def command(self, q) -> None:
         q = np.asarray(q, float) if self.last is None else nearest(q, self.last)
+        if self.control == "mit":
+            now = time.monotonic()
+            if self.last is not None:                    # MIT mode has no firmware speed limit: limit here
+                dt = 1.0 / RATE if self.t_last is None else min(now - self.t_last, 2.0 / RATE)
+                q = self.last + np.clip(q - self.last, -self.speed * dt, self.speed * dt)
+            self.last, self.t_last = q, now
+            self._send_mit(q)
+            return
         self.last = q
         for m, v in zip(ARM_IDS, self.cfg.to_motor(q)):
             self.rs.write_param_f32(m, P_LOC_REF, float(v))
@@ -373,7 +470,7 @@ class Arm:
     def hold(self) -> np.ndarray:
         """Hold where the arm is now."""
         q = self.read()
-        self.last = q
+        self.last, self.t_last = q, None
         self.command(q)
         return q
 
@@ -390,7 +487,7 @@ class Arm:
         `speed` (default MOVE_SPEED), streamed at RATE. Returns the pose reached after `settle` seconds."""
         q0 = self.read()
         q1 = nearest(q, q0)
-        self.last = q0
+        self.last, self.t_last = q0, None
         n = max(int(np.ceil(np.abs(q1 - q0).max() * 1.5 / (speed or MOVE_SPEED) * RATE)), 1)   # smoothstep: 1.5x the mean
         self.follow(q0 + ease(n)[:, None] * (q1 - q0))
         time.sleep(settle)
@@ -433,6 +530,9 @@ class Arm:
                     self.rs.stop(m)
                 time.sleep(0.01)
             self.enabled, self.grip_on = False, False
+            for m, lt in self.torque_orig.items():      # MIT: the motors' own torque limit back
+                self.rs.write_param_f32(m, P_LIMIT_TORQUE, float(lt))
+            self.torque_orig.clear()
 
     def close(self) -> None:
         try:
@@ -443,8 +543,10 @@ class Arm:
 
 
 @contextmanager
-def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None, grip: float | None = None):
+def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None, grip: float | None = None,
+            control: str = "position"):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
+    `control`: "position" (the motors' position mode) or "mit" (see MIT_KP / Arm).
     Without recorded poses it starts and ends where the arm was resting. `grip` (motor rad): at the
     initial pose the gripper opens to it and stays powered until the release (None: not touched).
 
@@ -455,7 +557,7 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
     alone always stops a powered task. A Ctrl+C before the work started is raised again (the work
     never runs)."""
     cfg, ask = cfg or load(), ask or input
-    arm = Arm(cfg, rs, speed, gripper=grip is not None)
+    arm = Arm(cfg, rs, speed, gripper=grip is not None, control=control)
     working, rest = False, None
     try:
         ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")

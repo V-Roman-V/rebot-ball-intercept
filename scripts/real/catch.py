@@ -11,7 +11,10 @@ follows the planner (the simulation's policy on the tracked ball). Roll the ball
 Keys (window): q finish (initial pose -> rest -> release), r reset the tracker.
 Ctrl+C in the terminal holds the arm where it is; ENTER then takes it back to rest and releases it,
 a second Ctrl+C drops it at once and stops.
-The motors' own speed limit and current cap are the safety.
+--control mit (default): the motors' MIT mode with the simulation's PD gains and gravity feed-forward,
+the controller of the system-identification run, so its fitted sim parameters describe this arm; the
+joint speed limit (--joint-speed) is applied by this program and the torque is capped in the motors.
+--control position: the motors' own position mode, speed limit and current cap.
 Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
 """
 from __future__ import annotations
@@ -44,6 +47,8 @@ def main() -> int:
     ap.add_argument("--height", type=float, default=20.0, help="fingertips above the table at the catch, mm (default 20; the ball is 44 mm tall: above its centre, 22 mm, it may squeeze under the fingers)")
     ap.add_argument("--grip", type=float, default=arm_mod.GRIP_OPEN,
                     help="gripper opening for the catch, motor rad (0.1 .. 5 = open; 0 = not powered, open it by hand)")
+    ap.add_argument("--control", choices=("mit", "position"), default="mit",
+                    help="mit: the sim's PD gains + gravity feed-forward (as identified); position: the motors' own loop")
     ap.add_argument("--joint-speed", type=float, default=1.5, help="firmware speed limit of every joint (rad/s)")
     args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
@@ -70,11 +75,12 @@ def main() -> int:
     trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane, jaw_height=args.height / 1000), HostClock()
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
-    log = {k: [] for k in ("t", "ball", "jaw", "q", "phase")}
+    log = {k: [] for k in ("t", "ball", "jaw", "q", "q_sent", "q_meas", "phase")}
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, cam.width * 2, cam.height * 2)
     try:
-        with arm_mod.powered(speed=args.joint_speed, grip=args.grip or None) as arm:
+        print(f"control: {args.control}", flush=True)
+        with arm_mod.powered(speed=args.joint_speed, grip=args.grip or None, control=args.control) as arm:
             arm.go(planner.plan(trk, time.monotonic()).q)          # the waiting pose at the intercept line
             trk.reset()
             planner.reset()
@@ -94,6 +100,8 @@ def main() -> int:
                 log["ball"].append(np.r_[st.pos, st.vel] if st is not None else np.full(4, np.nan))
                 log["jaw"].append(p.jaw)
                 log["q"].append(p.q)
+                log["q_sent"].append(arm.last.copy())
+                log["q_meas"].append(arm.measured() if args.control == "mit" else np.full(6, np.nan))
                 log["phase"].append(PHASES.index(p.phase))
                 if p.phase == "tracking":
                     last_cross = p.crossing_y
