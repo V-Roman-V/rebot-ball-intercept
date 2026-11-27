@@ -59,6 +59,16 @@ NO_SENS = 0.05               # ... and below this the roll cannot be read at all
 HOLD_GAP = 1.0               # s; SPACE repeats arriving within this gap count as "key held"
 GRID = 0.02                  # m, sweep coverage cell
 TARGET_X, TARGET_Y = (rc.GATE_X - 0.06, rc.GATE_X + 0.06), (-0.26, 0.26)      # box to cover around the intercept line
+# How the arm base is turned on the table, seen from above (0 = joint 1's zero points down the table,
+# -90 = turned 90 deg to the right). The sweep box and its top view are in table axes (x down the table).
+BASE_YAW_DEG = -90.0
+_c, _s = np.cos(np.radians(BASE_YAW_DEG)), np.sin(np.radians(BASE_YAW_DEG))
+TABLE_FROM_ARM = np.array([[_c, -_s], [_s, _c]])   # 2D: arm-frame xy -> table-frame xy
+
+
+def arm_xy(P_table) -> np.ndarray:
+    """(N, 2) table-frame points -> arm frame."""
+    return np.asarray(P_table, float).reshape(-1, 2) @ TABLE_FROM_ARM
 HD, VGA = (1280, 720, 30), (640, 480, 60)       # camera: the map steps / the ball step (= tracking)
 
 WIN = "rig calibration"
@@ -337,7 +347,8 @@ def run_sweep(cam, arm, sess: Path) -> str:
             save()
 
         allp = np.array([x[2] for st in strokes for x in st]).reshape(-1, 3)
-        cells = {(int(np.floor(p[0] / GRID)), int(np.floor(p[1] / GRID))) for p in allp}
+        tabp = allp[:, :2] @ TABLE_FROM_ARM.T                  # coverage in table axes
+        cells = {(int(np.floor(p[0] / GRID)), int(np.floor(p[1] / GRID))) for p in tabp}
         tx = range(int(np.floor(TARGET_X[0] / GRID)), int(np.ceil(TARGET_X[1] / GRID)))
         ty = range(int(np.floor(TARGET_Y[0] / GRID)), int(np.ceil(TARGET_Y[1] / GRID)))
         cover = sum((i, j) in cells for i in tx for j in ty) / (len(tx) * len(ty))
@@ -347,17 +358,18 @@ def run_sweep(cam, arm, sess: Path) -> str:
         for (i, j) in cells:
             top.cell(tv, ((i + 0.5) * GRID, (j + 0.5) * GRID), GRID, (0, 170, 0))
         if s is not None:
-            cv2.drawMarker(tv, ipt(top.px(s.p[:2])[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
-        put(tv, "top view, arm frame (m). green = covered", (8, 16), WHITE, 0.42)
+            cv2.drawMarker(tv, ipt(top.px(TABLE_FROM_ARM @ s.p[:2])[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
+        put(tv, f"top view, table axes (base turned {BASE_YAW_DEG:+.0f} deg). green = covered", (8, 16), WHITE, 0.42)
         put(tv, "yellow box = cover this well", (8, 34), YELLOW, 0.42)
 
         if pose is not None:                       # the same on the camera image
             pr = lambda P: rc.project(cam.K, cam.dist, *pose, np.asarray(P, float).reshape(-1, 3))
             z0 = float(np.median(allp[:, 2])) if len(allp) else (float(s.p[2]) if s is not None else 0.0)
-            box = pr([[TARGET_X[0], TARGET_Y[0], z0], [TARGET_X[1], TARGET_Y[0], z0],
-                      [TARGET_X[1], TARGET_Y[1], z0], [TARGET_X[0], TARGET_Y[1], z0]])
+            on_table = lambda xy: np.column_stack([arm_xy(xy), np.full(len(xy), z0)])
+            box = pr(on_table([[TARGET_X[0], TARGET_Y[0]], [TARGET_X[1], TARGET_Y[0]],
+                               [TARGET_X[1], TARGET_Y[1]], [TARGET_X[0], TARGET_Y[1]]]))
             cv2.polylines(img, [box.round().astype(np.int32)], True, YELLOW, 1, cv2.LINE_AA)
-            for c in pr([[(i + 0.5) * GRID, (j + 0.5) * GRID, z0] for i, j in cells]) if cells else []:
+            for c in pr(on_table([[(i + 0.5) * GRID, (j + 0.5) * GRID] for i, j in cells])) if cells else []:
                 cv2.circle(img, ipt(c), 3, (0, 200, 0), -1)
             if s is not None:
                 cv2.drawMarker(img, ipt(pr(s.p)[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
