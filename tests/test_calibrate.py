@@ -98,7 +98,7 @@ class SimRigCase(unittest.TestCase):
         with mock.patch.object(sys, "argv", [name, *argv]), \
                 mock.patch("eaiproject.realsense_client.RealSenseClient", lambda *a, **k: cam or self.cam), \
                 mock.patch.object(arm, "ArmReader", lambda *a, **k: self.arm), \
-                mock.patch.multiple(cv2, imshow=keys.imshow, waitKey=keys.waitkey, namedWindow=lambda *a: None,
+                mock.patch.multiple(cv2, imshow=keys.imshow, waitKey=keys.waitkey, pollKey=lambda: -1, namedWindow=lambda *a: None,
                                     resizeWindow=lambda *a: None, destroyAllWindows=lambda: None,
                                     destroyWindow=lambda *a: None, getWindowProperty=lambda *a: 1.0,
                                     createTrackbar=lambda name, win, v, mx, cb: self.bars.__setitem__(name, v),

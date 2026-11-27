@@ -36,7 +36,7 @@ from eaiproject import cli  # noqa: E402
 from eaiproject.real_intercept import (HostClock, InterceptPlanner, camera_calib, hsv_saved_time,  # noqa: E402
                                        locate_camera, make_tracker, table_z)
 from eaiproject import rig_calib  # noqa: E402
-from eaiproject.rig_draw import put, window_closed  # noqa: E402
+from eaiproject.rig_draw import open_window, put, window_closed  # noqa: E402
 
 WIN = "real tracking (shadow arm)"
 PRED_AT = (0.5, 0.3, 0.15)          # seconds before crossing at which the prediction is scored
@@ -78,6 +78,7 @@ def main() -> int:
     except OSError:
         print("Camera server not running: ./rig camera start")
         return 2
+    open_window(WIN, cam.width + 360, cam.height, "locating the camera from the table markers (hands off them) ...")
     try:
         calib, trk, monitor = setup(cam, rig_map)
     except rig_calib.CalibrationError as e:
@@ -97,7 +98,6 @@ def main() -> int:
     vcam.lookat[:], vcam.azimuth, vcam.elevation, vcam.distance = (0.3, 0, 0.1), -150, -25, 1.1
     arm_adr = planner.env.arm_qadr
 
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     when = hsv_saved_time()
     print(f"ball colour: {'saved ' + when if when else 'the default (./rig calibrate, step 5)'}", flush=True)
 

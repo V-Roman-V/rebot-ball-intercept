@@ -47,8 +47,8 @@ from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import markers, rig_report  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
-from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, WHITE, YELLOW, TopDown, ipt, outline, put,  # noqa: E402
-                                 window_closed)
+from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, WHITE, YELLOW, TopDown, ipt, open_window, outline,  # noqa: E402
+                                 put, window_closed)
 
 N_FRAMES = 30                # frames averaged per view
 # Quality checks: every reading is recorded; breaking one only adds a CHECK note (u undoes the reading).
@@ -805,12 +805,11 @@ def main() -> int:
     if cam is None:
         return 2
     print(f"session: {sess}")
+    open_window(WIN, 1280, 720, "connecting to the arm ...")
     arm = arm_mod.ArmLink()                         # connects whenever the arm answers on CAN
     if arm.status():
         print(f"{arm.status()} (steps 2-4 need it; the others work without it)", flush=True)
     step, code = start_step(sess, args), 0
-    cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WIN, 1280, 720)
     cli.ctrl_c_quits()
     try:
         while step != "quit":

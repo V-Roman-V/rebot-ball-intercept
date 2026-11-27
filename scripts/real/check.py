@@ -40,7 +40,7 @@ from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, RED, STATUS_COLOR, WHITE, YELLOW, draw_table_grid, ipt,  # noqa: E402
-                                 outline, put, window_closed)
+                                 open_window, outline, put, window_closed)
 
 NEAR_CORNER = 0.020          # m: the fingertip is "on" a corner when closer than this
 NEAR_POINT = 0.050           # m: the ball is "on" a known point when closer than this
@@ -66,6 +66,9 @@ def main() -> int:
     except OSError:
         print("Camera server not running: ./rig camera start")
         return 2
+    win = "check calibration (c locate camera, b ball, SPACE record, t add point, a colour, s screenshot, q quit)"
+    kk = 2 if cam.width < 900 else 1
+    open_window(win, cam.width * kk, cam.height * kk, "locating the camera from the table markers (hands off them) ...")
 
     def locate():
         res = locate_camera(cam, rig_map)
@@ -89,10 +92,6 @@ def main() -> int:
     extra = json.loads(pts_path.read_text()) if pts_path.exists() else {}
     corners = [(k, j, P[j]) for k, P in rig_map.markers.items() for j in range(4)]
     rows: list[dict] = []
-    win = "check calibration (c locate camera, b ball, SPACE record, t add point, a colour, s screenshot, q quit)"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    kk = 2 if cam.width < 900 else 1
-    cv2.resizeWindow(win, cam.width * kk, cam.height * kk)
     ball_mode, msg, last_fn, shots = False, "", None, 0
     cli.ctrl_c_quits()
     while True:

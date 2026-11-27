@@ -20,6 +20,23 @@ def put(img, text, org, color=WHITE, scale=0.55, thick=1):
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 
 
+def open_window(win: str, width: int, height: int, note: str = "starting ...") -> None:
+    """Create the window and put it on screen at once, with `note` on a dark frame. macOS shows an
+    OpenCV window only when it is first drawn, so a task that first locates the camera, opens the CAN
+    adapter or moves the arm would run for seconds with an app icon and no window."""
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, width, height)
+    show_note(win, note, width, height)
+
+
+def show_note(win: str, note: str, width: int = 1280, height: int = 720) -> None:
+    """`note` on a dark frame, drawn now (for the waits before a window has its picture)."""
+    img = np.full((height // 2, width // 2, 3), 40, np.uint8)
+    put(img, note, (16, img.shape[0] // 2), YELLOW, 0.6)
+    cv2.imshow(win, img)
+    cv2.pollKey()                                   # draws it; no key is read
+
+
 def window_closed(win: str) -> bool:
     try:
         return cv2.getWindowProperty(win, cv2.WND_PROP_VISIBLE) < 1
