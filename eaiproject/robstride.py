@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import struct
+import sys
 import time
 from dataclasses import dataclass
 
@@ -45,6 +46,7 @@ def ranges(mid: int) -> tuple[float, float, float, float]:
     return MODEL_RANGES[MOTOR_MODEL[mid]]
 
 P_MECHPOS, P_MECHVEL, P_IQF, P_VBUS, P_RUN_MODE = 0x7019, 0x701B, 0x701A, 0x701C, 0x7005
+P_LIMIT_TORQUE = 0x700B      # float, Nm; caps the output torque in every mode (RAM write only)
 T_MIT, T_FEEDBACK, T_ENABLE, T_STOP, T_READ, T_WRITE = 1, 2, 3, 4, 17, 18
 
 
@@ -68,10 +70,32 @@ class Feedback:
     t: float
 
 
+def resolve_can(interface: str | None = None, channel: str | None = None) -> tuple[str, str]:
+    """Pick the python-can interface and channel for this OS.
+
+    macOS: "pcan" (PEAK adapter through the PCBUSB library), channel PCAN_USBBUS1.
+    Linux: "socketcan" (kernel peak_usb driver), channel can0. Bring the link up once per boot:
+           sudo ip link set can0 up type can bitrate 1000000
+    A channel name starting with "PCAN_" always means the pcan interface (PCAN-Basic on Linux too).
+    """
+    if interface in (None, "", "auto"):
+        if channel and channel.upper().startswith("PCAN_"):
+            interface = "pcan"
+        else:
+            interface = "socketcan" if sys.platform.startswith("linux") else "pcan"
+    if not channel:
+        channel = "can0" if interface == "socketcan" else "PCAN_USBBUS1"
+    return interface, channel
+
+
 class RobStrideBus:
-    def __init__(self, channel: str = "PCAN_USBBUS1", bitrate: int = 1_000_000,
-                 movable: tuple[int, ...] = (GRIPPER_ID,)):
-        self.bus = can.Bus(interface="pcan", channel=channel, bitrate=bitrate)
+    def __init__(self, channel: str | None = None, bitrate: int = 1_000_000,
+                 movable: tuple[int, ...] = (GRIPPER_ID,), interface: str | None = None):
+        self.interface, self.channel = resolve_can(interface, channel)
+        if self.interface == "socketcan":     # bitrate is set on the link (ip link), not here
+            self.bus = can.Bus(interface="socketcan", channel=self.channel)
+        else:
+            self.bus = can.Bus(interface=self.interface, channel=self.channel, bitrate=bitrate)
         self.movable = tuple(movable)
         self.last_fb: dict[int, Feedback] = {}
 
@@ -82,8 +106,12 @@ class RobStrideBus:
         if comm in (T_MIT, T_ENABLE, T_WRITE) and mid not in self.movable:
             raise RuntimeError(f"refusing to send command type {comm} to motor {mid}: not in movable={self.movable}")
         field = (HOST_ID if mid_field is None else mid_field) & 0xFFFF
-        self.bus.send(can.Message(arbitration_id=(comm << 24) | (field << 8) | mid,
-                                  is_extended_id=True, data=data))
+        msg = can.Message(arbitration_id=(comm << 24) | (field << 8) | mid, is_extended_id=True, data=data)
+        try:
+            self.bus.send(msg, timeout=0.01)
+        except can.CanOperationError:          # SocketCAN: tx queue momentarily full (ENOBUFS); retry once
+            time.sleep(0.001)
+            self.bus.send(msg, timeout=0.01)
 
     def _handle(self, m: can.Message) -> tuple[int, int, bytes] | None:
         if m is None or not m.is_extended_id or m.is_error_frame:

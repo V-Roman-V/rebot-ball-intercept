@@ -1,0 +1,36 @@
+<!--
+  System-identification scene for the reBot Arm B601-RS (eaiproject/sysid).
+
+  The arm alone on the table, same physics options as ball_intercept_scene.xml, no ball.
+  The table is only used for the collision check of the excitation plan; the identification
+  rollouts run with contacts disabled (the arm moves in free air, as in the PACE paper).
+
+  This file must stay next to rs_arm.xml: meshdir="../meshes" is resolved
+  relative to the top-level model file.
+-->
+<mujoco model="rebot_rs_sysid">
+  <include file="rs_arm.xml"/>
+  <compiler angle="radian" meshdir="../meshes"/>
+
+  <option timestep="0.001" iterations="100" solver="Newton" integrator="implicitfast"/>
+
+  <contact>
+    <exclude body1="world" body2="link1"/>
+    <exclude body1="base_link" body2="link1"/>
+    <exclude body1="link1" body2="link2"/>
+    <exclude body1="link2" body2="link3"/>
+    <exclude body1="link2" body2="link5"/>
+    <exclude body1="link3" body2="link4"/>
+    <exclude body1="link3" body2="link5"/>
+    <exclude body1="link4" body2="link5"/>
+    <exclude body1="link5" body2="link6"/>
+  </contact>
+
+  <worldbody>
+    <light name="key" pos="0.6 -0.6 1.6" dir="-0.2 0.4 -1" directional="false" diffuse="0.7 0.7 0.7"/>
+    <!-- Table: top surface at z = 0, same as ball_intercept_scene.xml. -->
+    <body name="table" pos="0.45 0 -0.015">
+      <geom name="tabletop" type="box" size="0.60 0.35 0.015" rgba="0.8 0.74 0.62 1"/>
+    </body>
+  </worldbody>
+</mujoco>

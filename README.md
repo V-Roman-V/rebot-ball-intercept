@@ -39,7 +39,9 @@ eaiproject/                     Python package
   robstride.py                  RobStride CAN protocol over PEAK PCAN-USB (with a motor allow-list)
   realsense_client.py           client for the RealSense frame server
   kinematics.py, markers.py     FK from joint readings, ArUco table markers
+  sysid/                        actuator system identification (PACE): excitation, logging, CMA-ES fit
 scripts/
+  sysid/                        collect.py (real arm or --sim), fit.py -> sim_params.json, fake_can_test.py (README.md)
   sim/                          render_demo, eval_scripted, eval_tracked, live_tracking
   real/                         the ./rig tasks (calibrate, check, track, move, catch, ...), camera server
 config/rig_map.json             the table map (written by ./rig calibrate)

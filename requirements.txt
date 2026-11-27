@@ -6,6 +6,8 @@ imageio-ffmpeg==0.8.1
 pillow==13.0.0
 opencv-python==5.1.0.95      # ball tracker, ArUco calibration, live viewers (needs a display for imshow)
 scipy==1.18.1                # marker calibration (least squares)
+cmaes==0.13.1                # sysid: CMA-ES parameter fit (scripts/sysid/fit.py)
+matplotlib>=3.8              # sysid: data-quality and fit plots (optional; reports still work without it)
 
 # Real rig
 python-can==4.6.1            # RobStride motors over a PEAK PCAN-USB adapter (macOS also needs libPCBUSB, see docs/real_rig.md)
