@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 CAL_DIR = ROOT / "outputs" / "calibration"
 BALL_R = 0.022
 DEFAULT_HSV = ((5, 120, 120), (25, 255, 255))
-TABLE_XY = ((0.12, 1.00), (-0.36, 0.38))     # tracked region of the real table, robot frame (m)
+# Tracked region of the real table: x down the table, y across it (m), turned into the arm frame
+# with the base's turn on the table (rig_calib.BASE_YAW_DEG).
+TABLE_XY = rig_calib.arm_box((0.12, 1.00), (-0.36, 0.38))
 
 
 def table_z(plane, x, y) -> float:

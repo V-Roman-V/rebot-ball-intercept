@@ -59,16 +59,8 @@ NO_SENS = 0.05               # ... and below this the roll cannot be read at all
 HOLD_GAP = 1.0               # s; SPACE repeats arriving within this gap count as "key held"
 GRID = 0.02                  # m, sweep coverage cell
 TARGET_X, TARGET_Y = (rc.GATE_X - 0.06, rc.GATE_X + 0.06), (-0.26, 0.26)      # box to cover around the intercept line
-# How the arm base is turned on the table, seen from above (0 = joint 1's zero points down the table,
-# -90 = turned 90 deg to the right). The sweep box and its top view are in table axes (x down the table).
-BASE_YAW_DEG = -90.0
-_c, _s = np.cos(np.radians(BASE_YAW_DEG)), np.sin(np.radians(BASE_YAW_DEG))
-TABLE_FROM_ARM = np.array([[_c, -_s], [_s, _c]])   # 2D: arm-frame xy -> table-frame xy
-
-
-def arm_xy(P_table) -> np.ndarray:
-    """(N, 2) table-frame points -> arm frame."""
-    return np.asarray(P_table, float).reshape(-1, 2) @ TABLE_FROM_ARM
+# The sweep box and its top view are in table axes: the base's turn is rig_calib.BASE_YAW_DEG.
+BASE_YAW_DEG, TABLE_FROM_ARM, arm_xy = rc.BASE_YAW_DEG, rc.TABLE_FROM_ARM, rc.arm_xy
 HD, VGA = (1280, 720, 30), (640, 480, 60)       # camera: the map steps / the ball step (= tracking)
 
 WIN = "rig calibration"

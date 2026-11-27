@@ -38,6 +38,22 @@ MAP_PATH = ROOT / "config" / "rig_map.json"                 # committed: marker 
 OUT_DIR = ROOT / "outputs" / "calibration"                  # last camera pose, ball colour, check screenshots
 SESSIONS_DIR = ROOT / "outputs" / "rig_calib"               # raw observations per table-map session (git-ignored)
 GATE_X = 0.40                                               # intercept line of the "forward" mode
+# How the arm base is turned on the table, seen from above: 0 = joint 1's zero points down the table,
+# -90 = turned 90 deg to the right (the table then lies along the arm's +y).
+BASE_YAW_DEG = -90.0
+_cy, _sy = np.cos(np.radians(BASE_YAW_DEG)), np.sin(np.radians(BASE_YAW_DEG))
+TABLE_FROM_ARM = np.array([[_cy, -_sy], [_sy, _cy]])        # 2D rotation: arm-frame xy -> table axes (x down the table)
+
+
+def arm_xy(P_table) -> np.ndarray:
+    """(N, 2) points in table axes -> arm frame."""
+    return np.asarray(P_table, float).reshape(-1, 2) @ TABLE_FROM_ARM
+
+
+def arm_box(x_range, y_range) -> tuple:
+    """A box in table axes -> the arm-frame box ((x0, x1), (y0, y1)) around it."""
+    P = arm_xy([[x, y] for x in x_range for y in y_range])
+    return (float(P[:, 0].min()), float(P[:, 0].max())), (float(P[:, 1].min()), float(P[:, 1].max()))
 
 CORNER_NAMES = ("TL", "TR", "BR", "BL", "C")
 CENTRE = 4
