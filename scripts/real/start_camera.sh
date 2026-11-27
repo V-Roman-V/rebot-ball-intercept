@@ -6,6 +6,22 @@
 # Stop it with:  ./rig camera stop
 set -e
 T="$HOME/realsense_tools"
+# Apps that have the RealSense open, other than macOS's own camera service and our server. A browser
+# or a call app holding it leaves the server without frames (27 Nov 2026: Yandex).
+holders() {
+  ioreg -l -w0 -r -n "Intel(R) RealSense(TM) Depth Camera 435i" 2>/dev/null | grep IOUserClientCreator \
+    | sed -E 's/.*"pid ([0-9]+), ([^"]+)".*/\2 (pid \1)/' | grep -v -E '^(UVCAssistant|WindowServer|python[0-9.]*) ' | sort -u | paste -sd, -
+}
+advice() {
+  H="$(holders)"
+  if [ -n "$H" ]; then
+    echo "The camera is held by: $H"
+    echo "  -> quit it completely (Cmd+Q), unplug and replug the RealSense, then start again."
+  else
+    echo "  -> quit apps that may use a camera (browsers, Teams, Zoom, Telegram, FaceTime), unplug and replug the"
+    echo "     RealSense (a USB 3 port of the Mac, not a hub if possible), then start again."
+  fi
+}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$T"
 cp "$HERE/rs_server.py" "$T/rs_server.py"
@@ -34,6 +50,8 @@ OLD="$(cat "$T/rs_server.pid" 2>/dev/null || true)"
 case "$OLD" in ''|*[!0-9]*) OLD="" ;; esac
 if [ -n "$OLD" ] && ! ps -p "$OLD" -o command= 2>/dev/null | grep -q "rs_server.py"; then OLD=""; fi
 rm -f "$T/rs_server.log" "$T/rs_server.pid"      # root's files, but in our folder: we may delete them (not write them)
+H="$(holders)"
+[ -n "$H" ] && echo "CHECK: the camera is already open in: $H. If the start fails, quit it (Cmd+Q) and replug the camera."
 echo "starting the camera server as root (macOS asks for your password; then up to ~20 s) ..."
 # The server is started directly (no subshell around it), with all its output in the log, so that
 # the password helper returns at once. The helper still runs in the background, and this script
@@ -57,4 +75,12 @@ kill "$OSA" 2>/dev/null                          # the helper only; the server r
 if [ -n "$started" ]; then
   sleep 0.3; cat "$T/rs_server.log"; exit 0
 fi
-echo "server did not start; log:"; cat "$T/rs_server.log" 2>/dev/null || echo "(no log: password cancelled?)"; exit 1
+echo "server did not start; log:"
+if [ -s "$T/rs_server.log" ]; then
+  grep -v -E '^(Thread|Current thread|  File|Extension modules)' "$T/rs_server.log" || true
+  grep -q '^Timeout' "$T/rs_server.log" && echo "The server got stuck talking to the camera and ended itself."
+  advice
+else
+  echo "(no log: password cancelled?)"
+fi
+exit 1

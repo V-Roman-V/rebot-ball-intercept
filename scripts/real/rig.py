@@ -71,8 +71,15 @@ def camera_mode() -> tuple | None:
 
 def start_camera(mode=VGA) -> bool:
     w, h, f = mode
-    return subprocess.run(["bash", str(HERE / "start_camera.sh"), "--width", str(w), "--height", str(h),
-                           "--fps", str(f)]).returncode == 0 and camera_mode() is not None
+    if subprocess.run(["bash", str(HERE / "start_camera.sh"), "--width", str(w), "--height", str(h),
+                       "--fps", str(f)]).returncode != 0:
+        return False
+    t_end = time.monotonic() + 8.0            # the port opens a moment before the server answers
+    while time.monotonic() < t_end:
+        if camera_mode() is not None:
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def stop_camera() -> bool:

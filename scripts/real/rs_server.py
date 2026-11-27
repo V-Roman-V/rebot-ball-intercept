@@ -13,10 +13,15 @@ Protocol (TCP, 127.0.0.1 only):
         (no password needed) and disconnects every client, so they reconnect and read the new header.
 Slow clients just get the newest frame (older ones are dropped). The server exits after
 --idle-exit minutes without clients.
+
+librealsense can hang for good while (re)starting the stream when another app holds the camera. A
+watchdog (HANG_S) then ends this process, with the place it hung in the log, so the camera is free
+again and scripts/real/start_camera.sh can say what to do.
 """
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import socket
@@ -85,6 +90,9 @@ def serve_client(conn: socket.socket, latest: Latest, header: list, clients: lis
         conn.close()
 
 
+HANG_S = 45          # s: a start or a size switch that takes longer is stuck (a normal one: < 20 s)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--width", type=int, default=640)
@@ -110,6 +118,7 @@ def main():
             raise
         return p, pr
 
+    faulthandler.dump_traceback_later(HANG_S, exit=True)      # stuck in librealsense: end, do not hold the camera
     try:
         pipe, prof = start()
     except RuntimeError as e:
@@ -134,6 +143,8 @@ def main():
             raise SystemExit(f"camera still not available ({str(e2).strip().splitlines()[-1]}).\n"
                              "An app is using it: quit every app that may use a camera (Teams, Zoom, FaceTime, "
                              "Photo Booth, browser tabs with video), unplug and replug the RealSense, start again.") from None
+
+    faulthandler.cancel_dump_traceback_later()
 
     def make_header(prof, fps) -> bytes:
         dev = prof.get_device()
@@ -170,6 +181,7 @@ def main():
 
     def switch(new):
         nonlocal pipe, prof, mode
+        faulthandler.dump_traceback_later(HANG_S, exit=True)
         try:
             pipe.stop()
         except RuntimeError:
@@ -193,6 +205,7 @@ def main():
                 c.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+        faulthandler.cancel_dump_traceback_later()
         print(f"serving {mode[0]}x{mode[1]}@{mode[2]}", flush=True)
 
     threading.Thread(target=acceptor, daemon=True).start()

@@ -69,7 +69,7 @@ def sweep_frame(sess: Path) -> rc.TableFrame:
     if pts:
         return rc.TableFrame(rc.table_yaw_deg(pts))
     return rc.RigMap.load(rc.MAP_PATH).frame if rc.MAP_PATH.exists() else rc.TableFrame()
-HD, VGA = (1280, 720, 30), (640, 480, 60)       # camera: the map steps / the ball step (= tracking)
+VGA = (640, 480, 60)                            # camera: the ball step runs at the tracking size
 
 WIN = "rig calibration"
 NAV = "ENTER next step   BACKSPACE previous   1-5 jump (4 arm, 5 ball)   q quit (everything is saved)"
@@ -808,9 +808,12 @@ def main() -> int:
     cli.ctrl_c_quits()
     try:
         while step != "quit":
-            mode = HD if step in ("views", "touch", "sweep") else VGA if step == "ball" else None
-            if mode is not None:
-                cam = to_mode(cam, mode)
+            # No size switch for the map steps: every switch restarts the camera, and macOS's camera
+            # service crashed on that (27 Nov 2026: the Mac froze). They run at the size the server
+            # has (./rig camera hd beforehand reads small markers better). Only the ball colour is
+            # tuned at the tracking size.
+            if step == "ball":
+                cam = to_mode(cam, VGA)
             if step == "views":
                 go = run_views(cam, sess)
             elif step == "touch":

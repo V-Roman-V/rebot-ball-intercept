@@ -153,5 +153,37 @@ class CameraServerTest(unittest.TestCase):
             self.assertIsNone(rig.camera_mode())
 
 
+class HangTest(unittest.TestCase):
+    def test_a_start_stuck_in_the_camera_library_ends_the_server(self):
+        """librealsense can block for good when another app holds the camera: the server must not sit
+        there holding it. (In a subprocess: the watchdog ends the whole process.)"""
+        import subprocess
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        shutil.copy(ROOT / "scripts" / "real" / "rs_server.py", tmp / "rs_server.py")
+        code = f"""
+import sys, time, types, importlib.util
+rs = types.ModuleType("pyrealsense2")
+rs.stream = types.SimpleNamespace(depth="depth", color="color"); rs.format = types.SimpleNamespace(z16="z16", bgr8="bgr8")
+class config:
+    def enable_stream(self, *a): pass
+class pipeline:
+    def start(self, c): time.sleep(60)          # stuck
+rs.config, rs.pipeline = config, pipeline
+sys.modules["pyrealsense2"] = rs
+spec = importlib.util.spec_from_file_location("rs_server", r"{tmp / 'rs_server.py'}")
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.HANG_S = 1
+sys.argv = ["rs_server.py", "--port", "{PORT + 1}"]
+mod.main()
+"""
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+        self.assertLess(time.monotonic() - t0, 10.0)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Timeout", r.stderr)                    # start_camera.sh reads this in the log
+        self.assertIn("start", r.stderr)                      # and where it hung
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
