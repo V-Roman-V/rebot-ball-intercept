@@ -40,6 +40,7 @@ PHASES = ("home", "tracking", "arrived")
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--height", type=float, default=20.0, help="fingertips above the table at the catch, mm (default 20; the ball is 44 mm tall: above its centre, 22 mm, it may squeeze under the fingers)")
     ap.add_argument("--joint-speed", type=float, default=1.5, help="firmware speed limit of every joint (rad/s)")
     args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
@@ -63,7 +64,7 @@ def main() -> int:
     for w in res.warnings:
         print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
-    trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane), HostClock()
+    trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane, jaw_height=args.height / 1000), HostClock()
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
     log = {k: [] for k in ("t", "ball", "jaw", "q", "phase")}

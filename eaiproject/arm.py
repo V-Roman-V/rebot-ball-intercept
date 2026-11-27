@@ -415,13 +415,15 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
     Without recorded poses it starts and ends where the arm was resting.
 
-    Ctrl+C (or an error) holds the arm where it is. Then ENTER releases it, and the caller goes on
-    after its `with` (saves its log); or a second Ctrl+C releases it at once and stops the program
-    (KeyboardInterrupt). Ctrl+C alone always stops a powered task. A Ctrl+C before the work started
-    is raised again (the work never runs)."""
+    Ctrl+C (or an error) holds the arm where it is. Then ENTER takes it back to rest (through the
+    initial pose) and releases it there, and the caller goes on after its `with` (saves its log); if
+    the arm cannot move (lost bus), ENTER releases it where it is: support it. A second Ctrl+C, at the
+    prompt or on the way back, releases it at once and stops the program (KeyboardInterrupt). Ctrl+C
+    alone always stops a powered task. A Ctrl+C before the work started is raised again (the work
+    never runs)."""
     cfg, ask = cfg or load(), ask or input
     arm = Arm(cfg, rs, speed)
-    working = False
+    working, rest = False, None
     try:
         ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")
         start = arm.enable()
@@ -443,7 +445,22 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
                         arm.hold()
                     except Exception:  # noqa: BLE001  (lost the bus: nothing to hold with)
                         pass
-                ask(f"\n{why} -> holding. Support the arm, then ENTER releases it (Ctrl+C: drop it now)... ")
+                if rest is None:                         # failed while powering on: no pose to go back to
+                    ask(f"\n{why} -> holding. Support the arm, then ENTER releases it (Ctrl+C: drop it now)... ")
+                else:
+                    ask(f"\n{why} -> holding. ENTER takes it back to rest and releases it (Ctrl+C: drop it now)... ")
+                    try:
+                        if cfg.initial is not None:
+                            arm.go(cfg.initial_model())
+                        arm.go(rest)
+                    except Exception as e2:  # noqa: BLE001  (e.g. lost the bus)
+                        with _ctrl_c_after():
+                            try:
+                                arm.hold()
+                            except Exception:  # noqa: BLE001
+                                pass
+                        ask(f"could not go back to rest ({type(e2).__name__}: {e2}). Support the arm, then ENTER "
+                            "releases it (Ctrl+C: drop it now)... ")
             except (KeyboardInterrupt, EOFError):        # the second Ctrl+C (or stdin closed): release now, stop
                 forced = True
                 print("\nreleased", flush=True)

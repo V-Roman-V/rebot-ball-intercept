@@ -20,6 +20,7 @@ from __future__ import annotations
 import signal
 import sys
 signal.signal(signal.SIGINT, lambda *_: sys.exit(130))     # Ctrl+C while starting up: quiet (cli.run takes over)
+import argparse
 import json
 import threading
 import time
@@ -63,6 +64,9 @@ def setup(cam, rig_map):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--height", type=float, default=20.0, help="fingertips above the table at the catch, mm (default 20; the ball is 44 mm tall: above its centre, 22 mm, it may squeeze under the fingers)")
+    args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
     if not rig_calib.MAP_PATH.exists():
         print("config/rig_map.json not found: run ./rig calibrate first")
@@ -80,7 +84,7 @@ def main() -> int:
         print(f"CANNOT LOCATE THE CAMERA: {e}")
         cam.close()
         return 1
-    planner = InterceptPlanner(plane)
+    planner = InterceptPlanner(plane, jaw_height=args.height / 1000)
     gx = planner.gate_x
     clock = HostClock()
     mon_thread, mon_warned = None, False

@@ -165,8 +165,9 @@ class InterceptPlanner:
     Works in table axes (x down the table, the ball rolls toward -x); the IK gets arm-frame targets."""
 
     def __init__(self, plane, mode: str = "forward", max_lateral_speed: float = 0.6, max_yaw_rate: float = 1.5,
-                 max_y: float = 0.24, max_yaw: float = 0.6, hover: float = 0.015):
-        self.env = BallInterceptEnv(mode)
+                 max_y: float = 0.24, max_yaw: float = 0.6, hover: float = 0.015, jaw_height: float | None = None):
+        """jaw_height: fingertips above the table at the catch (m); None = the sim's (20 mm, forward mode)."""
+        self.env = BallInterceptEnv(mode, jaw_height=jaw_height)
         self.plane = plane
         self.gate_x, self.jaw_height = self.env.gate_x, self.env.jaw_height
         self.v_lat, self.w_yaw = max_lateral_speed, max_yaw_rate
