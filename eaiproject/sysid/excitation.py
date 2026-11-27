@@ -10,6 +10,7 @@ Plan (default, ~2.7 min of motion):
     chirp_A_large   train   0.1 -> fmax Hz, 30 s, full amplitude
     chirp_A_small   train   same sweep at 35 % amplitude (friction / low-speed regime)
     multisine_A     val     held-out: 12 sines with random phases, 25 s
+    steps_A         train   catch-like: fast straight moves between random poses, commands at 60 Hz
     to_B, settle_B
     chirp_B         train   second configuration (different inertia / gravity load), 70 % amplitude
     to_start, disable_hold  back to the start pose, ramp the feed-forward 1 -> 0
@@ -32,7 +33,9 @@ V_MAX = np.array([1.0, 0.8, 0.8, 1.5, 1.5, 2.0])          # rad/s
 ACC_MAX = np.array([8.0, 8.0, 8.0, 15.0, 15.0, 20.0])     # rad/s^2
 SIGNS = np.array([1, -1, 1, -1, 1, -1], float)            # alternate directions between neighbouring joints
 MOVE_SPEED = 0.3                                          # rad/s, peak joint speed of transfer moves
-EXCITE_NAMES = ("chirp_A_large", "chirp_A_small", "multisine_A", "chirp_B")
+EXCITE_NAMES = ("chirp_A_large", "chirp_A_small", "multisine_A", "steps_A", "chirp_B")
+STEP_SPEEDS = (0.8, 1.5, 2.2)                             # rad/s of the fastest joint in a steps move (scale: speed)
+STEP_RATE = 60.0                                          # Hz: the catch sends one target per camera frame
 
 
 @dataclass
@@ -112,6 +115,34 @@ def multisine(name: str, role: str, center, T: float = 25.0, f_lo: float = 0.2, 
     return Segment(name, "excite", role, pre + T + post, q, c)
 
 
+def steps(name: str, role: str, center, T: float = 25.0, scale: float = 1.0, speed: float = 1.0, seed: int = 11,
+          pre: float = 1.5, post: float = 1.0) -> Segment:
+    """The motion of a catch, away from the table: straight joint-space moves between random poses
+    within +-A_MAX * scale of `center`, the fastest joint at a constant speed (one of STEP_SPEEDS x
+    `speed`, as the catch's speed limit shapes its moves), a short stop at each pose, and targets
+    that change only STEP_RATE times a second. Chirps never ask for such starts and stops."""
+    c, rng = np.array(center, float), np.random.default_rng(seed)
+    times, poses, t, q = [0.0], [c], 0.0, c
+    while True:
+        nxt = c + rng.uniform(-1.0, 1.0, N) * A_MAX * scale
+        v = STEP_SPEEDS[len(poses) % len(STEP_SPEEDS)] * speed
+        t_arrive = t + float(np.abs(nxt - q).max()) / v
+        t_leave = t_arrive + rng.uniform(0.3, 0.8)
+        if t_leave + float(np.abs(c - nxt).max()) / v > T:        # no time left to come back: go home instead
+            break
+        times += [t_arrive, t_leave]; poses += [nxt, nxt]
+        t, q = t_leave, nxt
+    times.append(t + float(np.abs(c - q).max()) / (STEP_SPEEDS[0] * speed)); poses.append(c)
+    times, poses = np.array(times), np.array(poses)
+
+    def target(t: float) -> np.ndarray:
+        s = np.floor((t - pre) * STEP_RATE + 1e-9) / STEP_RATE
+        if s <= 0 or s >= times[-1]:
+            return c
+        return np.array([np.interp(s, times, poses[:, j]) for j in range(N)])
+    return Segment(name, "excite", role, pre + T + post, target, c)
+
+
 def build_plan(q_start, fmax: float = 4.0, scale: float = 1.0, only: list[str] | None = None,
                speed: float = 1.0) -> list[Segment]:
     """`speed` scales the joint speed and acceleration the excitation may reach (V_MAX, ACC_MAX)."""
@@ -123,6 +154,7 @@ def build_plan(q_start, fmax: float = 4.0, scale: float = 1.0, only: list[str] |
         chirp("chirp_A_large", "train", POSE_A, f1=fmax, scale=scale, speed=speed),
         chirp("chirp_A_small", "train", POSE_A, f1=fmax, scale=0.35 * scale, speed=speed),
         multisine("multisine_A", "val", POSE_A, f_hi=fmax, scale=scale, speed=speed),
+        steps("steps_A", "train", POSE_A, scale=scale, speed=speed),
     ) if want(s.name)]
     b_group = [s for s in (chirp("chirp_B", "train", POSE_B, f1=fmax, scale=0.7 * scale, speed=speed),) if want(s.name)]
     for pose, tag, group in ((POSE_A, "A", a_group), (POSE_B, "B", b_group)):

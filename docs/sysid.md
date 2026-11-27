@@ -59,7 +59,9 @@ The CAN backend is chosen automatically: `pcan` on macOS (see [real_rig.md](real
 4. **Enable.** The motors are enabled holding the rest pose, and the gravity feed-forward ramps in
    over 2 s. A steady-state check follows: an error over 4.6° means the feed-forward is wrong, so
    the arm returns and stops.
-5. **Pose A.** A full-amplitude chirp, a 35 % chirp and a held-out multisine (val). After each
+5. **Pose A.** A full-amplitude chirp, a 35 % chirp, a held-out multisine (val), and `steps_A`:
+   25 s of catch-like motion (fast straight moves between random poses near pose A at up to
+   2.2 rad/s, short stops, targets changing 60 times a second as in `./rig catch`). After each
    segment the script prints rate, missing feedback, RMS error and peak torque/cap, and saves the log.
 6. **Pose B.** One chirp at 70 % amplitude.
 7. **Back to rest.** The feed-forward ramps down, then the script waits for **Enter** while still

@@ -61,6 +61,20 @@ class ExcitationTest(unittest.TestCase):
         np.testing.assert_allclose(a2, np.minimum(excitation.A_MAX, 2 * a1))
         np.testing.assert_allclose(excitation.amplitude(0.05, 1.0, speed=2.0), excitation.A_MAX)   # slow: the amplitude cap
 
+    def test_steps_are_catch_like(self):
+        seg = excitation.steps("steps_A", "train", excitation.POSE_A)
+        t = np.arange(0.0, seg.duration, 0.001)
+        q = np.array([seg.q(x) for x in t])
+        np.testing.assert_allclose(q[0], excitation.POSE_A)
+        np.testing.assert_allclose(q[-1], excitation.POSE_A)                 # it ends where it started
+        self.assertTrue(np.all(np.abs(q - excitation.POSE_A) <= excitation.A_MAX + 1e-9))
+        change = np.flatnonzero(np.abs(np.diff(q, axis=0)).max(axis=1) > 0)
+        self.assertGreaterEqual(np.diff(change).min(), 16)                    # targets change 60 times a second, not more
+        speed = np.abs(np.diff(q, axis=0)).max(axis=1)[change] * excitation.STEP_RATE
+        self.assertLessEqual(speed.max(), max(excitation.STEP_SPEEDS) * 1.02)
+        self.assertGreater(speed.max(), 2.0)                                  # and it does reach the fast moves
+        self.assertGreater((np.abs(np.diff(q, axis=0)).max(axis=1) == 0).mean(), 0.9)   # stops between the moves
+
     def test_the_plan_is_unchanged_without_the_option(self):
         q0 = np.zeros(6)
         a, b = excitation.build_plan(q0), excitation.build_plan(q0, speed=1.0)
