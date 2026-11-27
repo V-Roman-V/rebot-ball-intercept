@@ -11,10 +11,14 @@ follows the planner (the simulation's policy on the tracked ball). Roll the ball
 Keys (window): q finish (initial pose -> rest -> release), r reset the tracker.
 Ctrl+C in the terminal holds the arm where it is; ENTER then takes it back to rest and releases it,
 a second Ctrl+C drops it at once and stops.
+The crossing point is the tracker's straight-line prediction; the arrival time counts the ball's
+measured slowdown (real_intercept.crossing).
+--joint-speed is the fastest joint motion the planner asks for: it shortens its steps along the
+intercept line instead of letting a limit cut the targets, so the jaw keeps its height.
 --control mit (default): the motors' MIT mode with the simulation's PD gains and gravity feed-forward,
 the controller of the system-identification run, so its fitted sim parameters describe this arm; the
-joint speed limit (--joint-speed) is applied by this program and the torque is capped in the motors.
---control position: the motors' own position mode, speed limit and current cap.
+torque is capped in the motors. --control position: the motors' own position mode and current cap.
+In both, the arm's own speed limit is a backstop 25 % above --joint-speed.
 Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
 """
 from __future__ import annotations
@@ -40,6 +44,7 @@ from eaiproject.rig_draw import GREEN, GREY, MAGENTA, WHITE, YELLOW, ipt, put, w
 
 WIN = "catch (q finish, r reset)"
 PHASES = ("home", "tracking", "arrived")
+BACKSTOP = 1.25              # the arm's own speed limit / the planner's: the planner shapes the motion, not the limit
 
 
 def main() -> int:
@@ -49,7 +54,8 @@ def main() -> int:
                     help="gripper opening for the catch, motor rad (0.1 .. 5 = open; 0 = not powered, open it by hand)")
     ap.add_argument("--control", choices=("mit", "position"), default="mit",
                     help="mit: the sim's PD gains + gravity feed-forward (as identified); position: the motors' own loop")
-    ap.add_argument("--joint-speed", type=float, default=1.5, help="firmware speed limit of every joint (rad/s)")
+    ap.add_argument("--joint-speed", type=float, default=3.0,
+                    help="fastest joint motion the planner asks for (rad/s); the arm's own limit is set 25 %% above it")
     args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
     if not rc.MAP_PATH.exists():
@@ -72,19 +78,19 @@ def main() -> int:
     for w in res.warnings:
         print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
-    trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane, jaw_height=args.height / 1000), HostClock()
+    trk, planner, clock = make_tracker(calib, plane), InterceptPlanner(plane, jaw_height=args.height / 1000, max_joint_speed=args.joint_speed), HostClock()
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
-    log = {k: [] for k in ("t", "ball", "jaw", "q", "q_sent", "q_meas", "phase")}
+    log = {k: [] for k in ("t", "ball", "meas", "ball_px", "jaw", "q", "q_sent", "q_meas", "phase")}
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WIN, cam.width * 2, cam.height * 2)
     try:
         print(f"control: {args.control}", flush=True)
-        with arm_mod.powered(speed=args.joint_speed, grip=args.grip or None, control=args.control) as arm:
+        with arm_mod.powered(speed=BACKSTOP * args.joint_speed, grip=args.grip or None, control=args.control) as arm:
             arm.go(planner.plan(trk, time.monotonic()).q)          # the waiting pose at the intercept line
             trk.reset()
             planner.reset()
-            last_fn, last_phase, last_cross = None, "home", None
+            last_fn, last_phase, last_cross, last_meas_t = None, "home", None, None
             print("following the ball: roll it. q in the window finishes, Ctrl+C in the terminal holds", flush=True)
             while True:
                 f = cam.read(timeout=2.0, newer_than=last_fn)
@@ -98,6 +104,10 @@ def main() -> int:
                 st = trk.state_at(now) if trk.ready else None
                 log["t"].append(now)
                 log["ball"].append(np.r_[st.pos, st.vel] if st is not None else np.full(4, np.nan))
+                new = trk.history[-1] if trk.history and trk.history[-1][0] != last_meas_t else None
+                last_meas_t = trk.history[-1][0] if trk.history else None
+                log["meas"].append(np.r_[new[0], new[1]] if new is not None else np.full(3, np.nan))   # the tracker's raw measurement
+                log["ball_px"].append(det.radius_px if det is not None else np.nan)   # its apparent size in the image
                 log["jaw"].append(p.jaw)
                 log["q"].append(p.q)
                 log["q_sent"].append(arm.last.copy())
@@ -122,16 +132,17 @@ def main() -> int:
                 along = np.r_[rc.arm_xy([[0.0, 0.03]])[0], 0.0]              # 3 cm along the line
                 jl, jr = proj([p.jaw - along, p.jaw + along])
                 cv2.line(img, ipt(jl), ipt(jr), YELLOW, 3)
-                put(img, f"POWERED  {p.phase}" + (f"  crossing y {p.crossing_y * 100:+.1f} cm in {p.t_cross * 1000:.0f} ms"
-                                                  if p.crossing_y is not None else ""), (8, 18), YELLOW)
+                put(img, f"POWERED  {p.phase}" + (
+                    "" if p.crossing_y is None else f"  crossing y {p.crossing_y * 100:+.1f} cm " +
+                    ("(stops before the line)" if p.t_cross is None else f"in {p.t_cross * 1000:.0f} ms")), (8, 18), YELLOW)
                 put(img, "q finish   r reset   Ctrl+C (terminal) holds, twice drops", (8, img.shape[0] - 10), GREY, 0.45)
                 cv2.imshow(WIN, img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q") or window_closed(WIN):
                     break
-                if key == ord("r"):
+                if key == ord("r"):                          # forget the ball; the jaw goes back to the middle
                     trk.reset()
-                    planner.reset()
+                    planner.recentre()
     finally:
         cv2.destroyAllWindows()
         cam.close()

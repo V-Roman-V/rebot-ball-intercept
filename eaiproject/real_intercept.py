@@ -154,7 +154,7 @@ class Plan:
     jaw: np.ndarray          # fingertip target (x, y, z), arm frame
     yaw: float               # jaw heading in table axes (0 = facing up the table, toward the ball)
     crossing_y: float | None # predicted crossing, table axes (m along the intercept line)
-    t_cross: float | None    # seconds until the ball reaches the line
+    t_cross: float | None    # seconds until the ball reaches the line (None: it would stop before the line)
     ik_err: float
     phase: str               # "home" | "tracking" | "arrived"
     jaw_y: float = 0.0       # the jaw's position along the line, table axes
@@ -162,15 +162,26 @@ class Plan:
 
 class InterceptPlanner:
     """Sim InterceptPolicy, real-time version. Call `plan(tracker, now)` every control tick.
-    Works in table axes (x down the table, the ball rolls toward -x); the IK gets arm-frame targets."""
+    Works in table axes (x down the table, the ball rolls toward -x); the IK gets arm-frame targets.
+
+    The ball: the tracker's estimate, extended along its straight path to the intercept line (the
+    crossing point), with the measured slowdown of a rolling ball for the arrival time (crossing()).
+
+    Speed: the jaw's command (position along the line, heading, hover height) advances at the task
+    limits, and the step is shortened whenever a joint would have to move faster than
+    `max_joint_speed`. Every target is therefore the IK solution of a point on the intercept line at
+    the planned height: the arm never cuts through other poses to catch up. The arm's own speed limit
+    (Arm.speed / the firmware's) is a backstop set above this one."""
 
     def __init__(self, plane, mode: str = "forward", max_lateral_speed: float = 0.6, max_yaw_rate: float = 1.5,
-                 max_y: float = 0.24, max_yaw: float = 0.6, hover: float = 0.015, jaw_height: float | None = None):
-        """jaw_height: fingertips above the table at the catch (m); None = the sim's (20 mm, forward mode)."""
+                 max_y: float = 0.30, max_yaw: float = 0.6, hover: float = 0.015, jaw_height: float | None = None,
+                 max_joint_speed: float = 3.0, max_hover_speed: float = 0.15):
+        """jaw_height: fingertips above the table at the catch (m); None = the sim's (20 mm, forward mode).
+        max_y: reach along the line (+-0.30 m is reachable at catch height with any jaw heading)."""
         self.env = BallInterceptEnv(mode, jaw_height=jaw_height)
         self.plane = plane
         self.gate_x, self.jaw_height = self.env.gate_x, self.env.jaw_height
-        self.v_lat, self.w_yaw = max_lateral_speed, max_yaw_rate
+        self.v_lat, self.w_yaw, self.v_hover, self.w_joint = max_lateral_speed, max_yaw_rate, max_hover_speed, max_joint_speed
         self.max_y, self.max_yaw, self.hover = max_y, max_yaw, hover
         self.turn = rig_calib.ARM_TURN
         self.q_home = home_pose(self.env, plane, hover)
@@ -180,49 +191,96 @@ class InterceptPlanner:
         self.reset()
 
     def reset(self):
+        """The start state: the jaw at the middle of the line, hovering. Call it when the arm IS there
+        (after the move to plan().q); to bring a jaw back from elsewhere use recentre()."""
         self.q_cmd = self.q_home.copy()
-        self.y_cmd, self.yaw_cmd, self.t_last = 0.0, 0.0, None
+        self.y_cmd, self.yaw_cmd, self.hover_cmd, self.t_last = 0.0, 0.0, self.hover, None
+        self.recentring = False
         self.env.data.qpos[self.env.arm_qadr] = self.q_home
 
-    def home_jaw(self) -> np.ndarray:
-        return self.jaw_target(0.0, 0.0, far=True)
+    def recentre(self):
+        """Go back to the middle of the line, at the planner's speeds."""
+        self.recentring = True
 
-    def jaw_target(self, y, dist, far=False):
-        """Arm-frame fingertip target on the intercept line at table y."""
-        hover = self.hover if far else self.hover * float(np.clip((dist - 0.10) / 0.20, 0.0, 1.0))
+    def home_jaw(self) -> np.ndarray:
+        return self.jaw_target(0.0, self.hover)
+
+    def jaw_target(self, y, hover):
+        """Arm-frame fingertip target on the intercept line at table y, `hover` above the catch height."""
         return rig_calib.line_point(self.plane, y, self.jaw_height + hover, self.gate_x)
 
     def line_point(self, y, dz: float = 0.0) -> np.ndarray:
         """Arm-frame point of the intercept line at table y, `dz` above the table (for drawing)."""
         return rig_calib.line_point(self.plane, y, dz, self.gate_x)
 
+    def _advance(self, y_goal: float, yaw_goal: float, hover_goal: float, dt: float) -> None:
+        """Move the command toward the goals: task-space rate limits, then a shorter step if a joint
+        would exceed max_joint_speed. The command and q_cmd always agree."""
+        if dt <= 0.0:
+            return
+        step = np.array([np.clip(y_goal - self.y_cmd, -self.v_lat * dt, self.v_lat * dt),
+                         np.clip(yaw_goal - self.yaw_cmd, -self.w_yaw * dt, self.w_yaw * dt),
+                         np.clip(hover_goal - self.hover_cmd, -self.v_hover * dt, self.v_hover * dt)])
+        if not np.any(step):
+            return
+        cmd0, limit, frac = np.array([self.y_cmd, self.yaw_cmd, self.hover_cmd]), self.w_joint * dt, 1.0
+        for _ in range(4):
+            y, yaw, hover = cmd0 + frac * step
+            q = self.env.ik_jaw(*self.jaw_target(y, hover), yaw=yaw + self.turn, q0=self.q_cmd, iters=40)
+            worst = float(np.abs(q - self.q_cmd).max())
+            if worst <= limit * 1.02:
+                self.y_cmd, self.yaw_cmd, self.hover_cmd, self.q_cmd = float(y), float(yaw), float(hover), q
+                return
+            frac *= 0.9 * limit / worst
+        # no step along the line is slow enough (the IK changed branch): stay; the command keeps its pose
+
     def plan(self, trk: BallTracker, now: float) -> Plan:
         dt = 0.0 if self.t_last is None else min(now - self.t_last, 0.1)
         self.t_last = now
         st = trk.state_at(now) if trk.ready else None
         cross, t_cross, phase = None, None, "home"
-        y_goal, yaw_goal, dist = self.y_cmd, self.yaw_cmd, 1.0
+        y_goal, yaw_goal, hover_goal = self.y_cmd, self.yaw_cmd, self.hover
         vel = rig_calib.table_xy(st.vel) if st is not None else None
-        if st is not None and vel[0] < -0.05:
-            x, y = rig_calib.table_xy(st.pos)
-            vx, vy = vel
-            dist = x - self.gate_x
+        if st is not None and vel[0] < -0.05:                 # a tracked ball moving toward the arm
+            pos = rig_calib.table_xy(st.pos)
+            dist = float(pos[0]) - self.gate_x
             if dist < -0.05:
                 phase = "arrived"
             else:
-                phase = "tracking"
-                t_cross = max(dist / -vx, 0.0)
-                cross = float(y + vy * t_cross)
+                phase, self.recentring = "tracking", False
+                cross, t_cross = crossing(pos, vel, self.gate_x)
                 y_goal = float(np.clip(cross, -self.max_y, self.max_y))
-                yaw_goal = float(np.clip(np.arctan2(-vy, -vx), -self.max_yaw, self.max_yaw))
+                yaw_goal = float(np.clip(np.arctan2(-vel[1], -vel[0]), -self.max_yaw, self.max_yaw))
+                hover_goal = self.hover * float(np.clip((dist - 0.10) / 0.20, 0.0, 1.0))
+        if phase == "home" and self.recentring:
+            y_goal, yaw_goal = 0.0, 0.0
+            self.recentring = abs(self.y_cmd) > 1e-4 or abs(self.yaw_cmd) > 1e-4
         if phase != "arrived":
-            self.y_cmd += float(np.clip(y_goal - self.y_cmd, -self.v_lat * dt, self.v_lat * dt))
-            self.yaw_cmd += float(np.clip(yaw_goal - self.yaw_cmd, -self.w_yaw * dt, self.w_yaw * dt))
-            jaw = self.jaw_target(self.y_cmd, dist, far=(phase == "home"))
-            self.q_cmd = self.env.ik_jaw(*jaw, yaw=self.yaw_cmd + self.turn, q0=self.q_cmd, iters=40)
-        jaw = self.jaw_target(self.y_cmd, dist, far=(phase == "home"))
+            self._advance(y_goal, yaw_goal, hover_goal, dt)
+        jaw = self.jaw_target(self.y_cmd, self.hover_cmd)
         err = self.env.jaw_error(self.q_cmd, *jaw)
         return Plan(self.q_cmd.copy(), jaw, self.yaw_cmd, cross, t_cross, err, phase, self.y_cmd)
+
+
+BALL_DECEL = 0.20            # m/s^2: speed a rolling ball loses on this table (27 Nov 2026: 0.18 .. 0.26 over 31 rolls)
+
+
+def crossing(pos, vel, x_line: float, decel: float = BALL_DECEL) -> tuple[float, float | None]:
+    """A ball at `pos` moving with `vel` toward -x (table axes): (y where its straight path crosses
+    x = x_line, seconds until then). The path is the straight line of the tracker's estimate; the
+    time counts the ball's slowdown (`decel` m/s^2 along the path; 0 = constant speed). The time is
+    None when the ball would come to rest before the line: the y is still where its path crosses."""
+    gap = float(pos[0]) - x_line
+    y = float(pos[1] + vel[1] * gap / -vel[0])
+    if gap <= 0.0:
+        return y, 0.0
+    speed = float(np.hypot(vel[0], vel[1]))
+    d = gap * speed / -float(vel[0])                          # distance to the line along the path
+    if decel <= 0.0:
+        return y, d / speed
+    if speed * speed < 2.0 * decel * d:
+        return y, None
+    return y, (speed - float(np.sqrt(speed * speed - 2.0 * decel * d))) / decel
 
 
 def home_pose(env: BallInterceptEnv, plane, dz: float = 0.0) -> np.ndarray:

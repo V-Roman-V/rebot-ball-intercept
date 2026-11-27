@@ -140,7 +140,7 @@ def main() -> int:
         if roll is not None and now - roll.t0 > 8.0:          # never crossed (stopped / rolled off): drop
             roll = None
         if roll is not None:
-            if p.phase == "tracking" and p.crossing_y is not None:
+            if p.phase == "tracking" and p.crossing_y is not None and p.t_cross is not None:
                 roll.preds.append((p.t_cross, p.crossing_y))
                 roll.speed = float(np.linalg.norm(st.vel))
             hist = [(t, rig_calib.table_xy(xy)) for t, xy in trk.history[-2:]]     # table axes
@@ -192,7 +192,8 @@ def main() -> int:
             bx, by = rig_calib.table_xy(st.pos)
             put(img, f"ball {bx*100:5.1f} cm down the table, {by*100:+5.1f} cm across  v {np.linalg.norm(st.vel):.2f} m/s", (8, 38))
         if p.crossing_y is not None:
-            put(img, f"crossing y {p.crossing_y*100:+5.1f} cm in {p.t_cross*1000:4.0f} ms  -> jaw y {p.jaw_y*100:+5.1f} cm",
+            when = "stops before the line" if p.t_cross is None else f"in {p.t_cross*1000:4.0f} ms"
+            put(img, f"crossing y {p.crossing_y*100:+5.1f} cm {when}  -> jaw y {p.jaw_y*100:+5.1f} cm",
                 (8, 58), (255, 0, 255))
         put(img, f"SHADOW: arm not powered | jaw target z {(p.jaw[2]-table_z(planner.plane, p.jaw[0], p.jaw[1]))*1000:.0f} mm above table"
                  f" | IK err {p.ik_err*1000:.1f} mm", (8, img.shape[0] - 10), (0, 255, 255), 0.45)

@@ -53,8 +53,8 @@ GRIP_SPEED, GRIP_CUR = 2.0, 2.0           # rad/s, A: the gripper's firmware spe
 # MIT control (Arm(control="mit")): the motors' MIT mode with the simulation's PD gains and the model's
 # gravity as feed-forward, as in BallInterceptEnv and the system-identification run (scripts/sysid), so
 # a fitted sim_params.json describes the arm under this controller. MIT mode has no firmware speed
-# limit: each target is limited to `speed` (rad/s) here instead. The torque cap is the motors'
-# limit_torque, written for the run and restored on release.
+# limit: Arm.command() limits the step to `speed` (rad/s) as a backstop, scaling the whole pose. The
+# torque cap is the motors' limit_torque, written for the run and restored on release.
 RUN_MODE_MIT = 0
 P_LIMIT_TORQUE = 0x700B                   # Nm (checked on this arm's firmware by the sysid run, 27 Nov)
 MIT_KP = np.array([80.0, 100.0, 100.0, 35.0, 25.0, 18.0])
@@ -457,9 +457,16 @@ class Arm:
         q = np.asarray(q, float) if self.last is None else nearest(q, self.last)
         if self.control == "mit":
             now = time.monotonic()
-            if self.last is not None:                    # MIT mode has no firmware speed limit: limit here
+            if self.last is not None:
+                # MIT mode has no firmware speed limit: this is the backstop. The whole step is scaled
+                # (never joint by joint), so a limited target stays on the straight joint-space line to
+                # the wanted one. Callers keep their own motion below `speed` (the planner does).
                 dt = 1.0 / RATE if self.t_last is None else min(now - self.t_last, 2.0 / RATE)
-                q = self.last + np.clip(q - self.last, -self.speed * dt, self.speed * dt)
+                step = q - self.last
+                worst = float(np.abs(step).max())
+                if worst > self.speed * dt:
+                    step *= self.speed * dt / worst
+                q = self.last + step
             self.last, self.t_last = q, now
             self._send_mit(q)
             return
