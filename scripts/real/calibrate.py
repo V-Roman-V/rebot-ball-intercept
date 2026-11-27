@@ -557,7 +557,8 @@ def run_ball(cam, sess: Path) -> str:
     when = hsv_saved_time()
     cur = [list(saved[0]), list(saved[1])]
     seen, msg, last_fn, trk = deque(maxlen=60), "", None, None
-    sel = {"start": None, "now": None, "done": None}   # mouse: drag a box around the ball (window pixels)
+    sel = {"start": None, "now": None, "done": None, "used": None}   # mouse: drag a box around the ball
+    sized = False                                   # window resized to the image's shape (see below)
 
     def on_mouse(event, x, y, _flags, _param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -601,6 +602,12 @@ def run_ball(cam, sess: Path) -> str:
             f = cam.read(timeout=2.0, newer_than=last_fn)
             last_fn = f.frame_number
             img, sc = big(f.img)
+            if not sized:
+                # The window is 16:9 for the map steps; this image is 4:3. macOS's OpenCV window then shows it
+                # with side bars but reports mouse positions as if there were none, so the selection would
+                # sample the wrong pixels. Same shape as the image: no bars, mouse and image agree.
+                cv2.resizeWindow(WIN, int(720 * img.shape[1] / img.shape[0]), 720)   # fits a laptop screen
+                sized = True
             if trk is not None:
                 for name, which, ch, _ in SLIDERS:
                     cur[which][ch] = cv2.getTrackbarPos(name, BALL_WIN)
@@ -617,6 +624,10 @@ def run_ball(cam, sess: Path) -> str:
                     inset = cv2.resize(cv2.cvtColor(full, cv2.COLOR_GRAY2BGR), (img.shape[1] // 3, img.shape[0] // 3))
                     img[-inset.shape[0] - 40:-40, -inset.shape[1]:] = inset
                     put(img, "colour mask", (img.shape[1] - inset.shape[1] + 4, img.shape[0] - inset.shape[0] - 46), WHITE, 0.4)
+            if sel["used"] is not None:                 # where the last selection sampled
+                ux0, uy0, ux1, uy1 = sel["used"]
+                cv2.ellipse(img, ipt(((ux0 + ux1) / 2, (uy0 + uy1) / 2)),
+                            (max(1, int(abs(ux1 - ux0) / 2)), max(1, int(abs(uy1 - uy0) / 2))), 0, 0, 360, MAGENTA, 1, cv2.LINE_AA)
             if sel["start"] is not None:                # dragging: show the box
                 cv2.rectangle(img, sel["start"], sel["now"], MAGENTA, 1, cv2.LINE_AA)
             if sel["done"] is not None and trk is not None:
@@ -631,7 +642,9 @@ def run_ball(cam, sess: Path) -> str:
                 else:
                     cur[:] = [list(res_sel[0]), list(res_sel[1])]
                     set_sliders()
-                    msg = f"from the selection: lo {tuple(cur[0])} hi {tuple(cur[1])}; roll the ball to check"
+                    sel["used"] = (ax, ay, bx, by)
+                    msg = (f"from the selection (magenta ellipse = the pixels used): lo {tuple(cur[0])} hi {tuple(cur[1])}"
+                           "; roll the ball to check")
             elif sel["done"] is not None:
                 sel["done"] = None
                 msg = "locate the camera first (c), then select the ball"
@@ -668,6 +681,8 @@ def run_ball(cam, sess: Path) -> str:
                 locate()
     finally:
         cv2.setMouseCallback(WIN, lambda *_: None)    # the other steps share the window
+        if sized:
+            cv2.resizeWindow(WIN, 1280, 720)
         if trk is not None:
             cv2.destroyWindow(BALL_WIN)
 
