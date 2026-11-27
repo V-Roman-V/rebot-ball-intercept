@@ -18,7 +18,16 @@ SIZES = {                   # ID -> side of the black square, metres (measured: 
     "718": 0.0715,
 }
 
-_DETECTOR = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(DICT), cv2.aruco.DetectorParameters())
+UPSCALE_BELOW = 1000        # px: an image narrower than this is searched at twice its size
+
+
+def _detector() -> cv2.aruco.ArucoDetector:
+    p = cv2.aruco.DetectorParameters()
+    p.perspectiveRemovePixelPerCell = 8      # bits are read from 8 px per cell (default 4): steadier for cells ~3 px wide
+    return cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(DICT), p)
+
+
+_DETECTOR = _detector()
 
 
 def fit_edges(gray: np.ndarray, corners, max_shift: float = 3.0, passes: int = 2) -> np.ndarray | None:
@@ -91,14 +100,19 @@ def edge_contrast(gray: np.ndarray, corners) -> float:
 
 
 def detect(img_bgr: np.ndarray) -> dict[str, np.ndarray]:
-    """Known table markers in the image: ID -> (4, 2) corner pixels, OpenCV order TL, TR, BR, BL."""
+    """Known table markers in the image: ID -> (4, 2) corner pixels, OpenCV order TL, TR, BR, BL.
+    A small image (640x480) is searched at twice its size: a far marker is ~20 px wide there and
+    flickered (read in 58 % of positions under 20 px, 94 % this way; offline study of the 27 Nov 2026
+    views). The corners are always fitted on the image itself, so their accuracy does not change."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    corners, ids, _ = _DETECTOR.detectMarkers(gray)
+    up = 2 if gray.shape[1] < UPSCALE_BELOW else 1
+    search = gray if up == 1 else cv2.resize(gray, None, fx=up, fy=up, interpolation=cv2.INTER_CUBIC)
+    corners, ids, _ = _DETECTOR.detectMarkers(search)
     out = {}
     if ids is not None:
         for c, i in zip(corners, ids.ravel()):
             if str(int(i)) in SIZES:
-                c = c.reshape(4, 2).astype(np.float64)
+                c = (c.reshape(4, 2).astype(np.float64) + 0.5) / up - 0.5     # pixel centres of the searched image -> this one
                 fine = fit_edges(gray, c)
                 out[str(int(i))] = c if fine is None else fine
     return out

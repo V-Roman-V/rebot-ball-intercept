@@ -248,7 +248,7 @@ class GuidedCornersTest(unittest.TestCase):
         return rc.project(self.cam.K, self.cam.dist, self.cam.rvec, self.cam.tvec, self.world.truth[k][:4])
 
     def test_recovers_an_unread_marker(self):
-        img = cv2.GaussianBlur(self.cam.read().img, (0, 0), 0.8)
+        img = cv2.GaussianBlur(self.cam.read().img, (0, 0), 1.2)     # blurred until 107 cannot be read
         plain = markers.detect(img)
         self.assertNotIn("107", plain)
         found, guided = rc.detect_with_map(img, self.map, self.cam.K, self.cam.dist)       # pose from the other three
