@@ -159,7 +159,7 @@ def status() -> int:
     print(f"CAN      {can_adapter()}  (./rig arm reads the joints)")
     if rc.MAP_PATH.exists():
         m = rc.RigMap.load(rc.MAP_PATH)
-        line = [rc.plane_z(m.plane, rc.GATE_X, y) * 1000 for y in (-0.24, 0.0, 0.24)]
+        line = [rc.line_point(m.plane, y)[2] * 1000 for y in (-0.24, 0.0, 0.24)]
         print(f"map      {rc.MAP_PATH.relative_to(ROOT)} of {m.time}: markers {sorted(m.markers)} "
               f"(far: {[k for k in m.markers if m.is_far(k)]}), reprojection {m.stats.get('reproj_rms_px')} px, "
               f"touches {m.stats.get('touch_xy_rms_mm')} mm in the plane, {len(m.warnings)} warning(s)")

@@ -348,9 +348,9 @@ def run_sweep(cam, arm, sess: Path) -> str:
         tv = top.canvas(rc.GATE_X)                 # top view: needs no camera pose
         top.rect(tv, TARGET_X, TARGET_Y, YELLOW, 1)
         for (i, j) in cells:
-            top.cell(tv, ((i + 0.5) * GRID, (j + 0.5) * GRID), GRID, (0, 170, 0))
+            top.cell(tv, arm_xy([[(i + 0.5) * GRID, (j + 0.5) * GRID]])[0], GRID, (0, 170, 0))
         if s is not None:
-            cv2.drawMarker(tv, ipt(top.px(TABLE_FROM_ARM @ s.p[:2])[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
+            cv2.drawMarker(tv, ipt(top.px(s.p[:2])[0]), MAGENTA, cv2.MARKER_CROSS, 18, 2)
         put(tv, f"top view, table axes (base turned {BASE_YAW_DEG:+.0f} deg). green = covered", (8, 16), WHITE, 0.42)
         put(tv, "yellow box = cover this well", (8, 34), YELLOW, 0.42)
 

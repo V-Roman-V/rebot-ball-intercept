@@ -129,7 +129,7 @@ def main() -> int:
 
         # ---- roll bookkeeping
         st = trk.state_at(now) if trk.ready else None
-        moving = st is not None and st.vel[0] < -0.15
+        moving = st is not None and rig_calib.table_xy(st.vel)[0] < -0.15     # rolling down the table toward the arm
         if moving and roll is None:
             roll = Roll()
             roll.t0 = now
@@ -139,7 +139,7 @@ def main() -> int:
             if p.phase == "tracking" and p.crossing_y is not None:
                 roll.preds.append((p.t_cross, p.crossing_y))
                 roll.speed = float(np.linalg.norm(st.vel))
-            hist = trk.history
+            hist = [(t, rig_calib.table_xy(xy)) for t, xy in trk.history[-2:]]     # table axes
             if len(hist) >= 2 and hist[-1][1][0] < gx <= hist[-2][1][0]:     # crossed between the last 2 measurements
                 (t1, a), (t2, b) = hist[-2], hist[-1]
                 s = (a[0] - gx) / (a[0] - b[0])
@@ -159,7 +159,7 @@ def main() -> int:
 
         # ---- drawing
         img = f.img.copy()
-        line_pts = proj([[gx, y, table_z(plane, gx, y)] for y in (-0.30, 0.30)])
+        line_pts = proj([planner.line_point(y) for y in (-0.30, 0.30)])
         cv2.line(img, tuple(line_pts[0]), tuple(line_pts[1]), (255, 255, 255), 1)
         if det is not None:
             cv2.circle(img, tuple(np.round(det.uv).astype(int)), int(max(det.radius_px, 4)) + 3, (0, 255, 0), 2)
@@ -171,12 +171,13 @@ def main() -> int:
             tipv = proj([[*(st.pos + st.vel * 0.25), ball_z(*st.pos)]])[0]
             cv2.arrowedLine(img, tuple(c), tuple(tipv), (255, 0, 255), 2)
             if p.crossing_y is not None:
-                cp = proj([[gx, p.crossing_y, table_z(plane, gx, p.crossing_y) + 0.022]])[0]
+                cp = proj([planner.line_point(p.crossing_y, 0.022)])[0]
                 cv2.line(img, tuple(c), tuple(cp), (255, 0, 255), 1)
                 cv2.drawMarker(img, tuple(cp), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
         jw = proj([p.jaw])[0]
-        jl = proj([p.jaw + [0, -0.05, 0]])[0]
-        jr = proj([p.jaw + [0, 0.05, 0]])[0]
+        along = np.r_[rig_calib.arm_xy([[0.0, 0.05]])[0], 0.0]          # 5 cm along the line
+        jl = proj([p.jaw - along])[0]
+        jr = proj([p.jaw + along])[0]
         cv2.line(img, tuple(jl), tuple(jr), (0, 255, 255), 3)          # open jaw, 10 cm
         cv2.circle(img, tuple(jw), 3, (0, 255, 255), -1)
         status = ("TRACKING" if det is not None else "COASTING") if trk.ready else ("ACQUIRING" if trk.x is not None else "NO BALL")
@@ -184,11 +185,12 @@ def main() -> int:
         put(img, f"{status}  {fps:4.1f} fps  frame age {(now - f.t_host)*1000:3.0f} ms  CV {np.mean(trk.timing_ms[-30:]):.1f} ms",
             (8, 18), col)
         if st is not None:
-            put(img, f"ball x {st.pos[0]*100:5.1f} y {st.pos[1]*100:+5.1f} cm  v {np.linalg.norm(st.vel):.2f} m/s", (8, 38))
+            bx, by = rig_calib.table_xy(st.pos)
+            put(img, f"ball {bx*100:5.1f} cm down the table, {by*100:+5.1f} cm across  v {np.linalg.norm(st.vel):.2f} m/s", (8, 38))
         if p.crossing_y is not None:
-            put(img, f"crossing y {p.crossing_y*100:+5.1f} cm in {p.t_cross*1000:4.0f} ms  -> jaw y {p.jaw[1]*100:+5.1f} cm",
+            put(img, f"crossing y {p.crossing_y*100:+5.1f} cm in {p.t_cross*1000:4.0f} ms  -> jaw y {p.jaw_y*100:+5.1f} cm",
                 (8, 58), (255, 0, 255))
-        put(img, f"SHADOW: arm not powered | jaw target z {(p.jaw[2]-table_z(planner.plane, gx, p.jaw[1]))*1000:.0f} mm above table"
+        put(img, f"SHADOW: arm not powered | jaw target z {(p.jaw[2]-table_z(planner.plane, p.jaw[0], p.jaw[1]))*1000:.0f} mm above table"
                  f" | IK err {p.ik_err*1000:.1f} mm", (8, img.shape[0] - 10), (0, 255, 255), 0.45)
         if monitor.warning:
             put(img, monitor.warning, (8, 82), (0, 0, 255), 0.5, 2)

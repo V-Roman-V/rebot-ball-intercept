@@ -59,10 +59,10 @@ def layout_image(sol: rc.RigSolution) -> np.ndarray:
         cv2.line(img, ipt(a), ipt(b), MAGENTA, 1, cv2.LINE_AA)
     for name, (rv, tv) in sol.cams.items():
         C = rc.camera_centre(rv, tv)
-        c = top.px(np.clip(C[:2], [top.x[0], top.y[0]], [top.x[1], top.y[1]]))[0]
+        c = top.pt(np.clip(rc.table_xy(C[:2]), [top.x[0], top.y[0]], [top.x[1], top.y[1]]))[0]
         cv2.drawMarker(img, ipt(c), WHITE, cv2.MARKER_TRIANGLE_UP, 10, 1)
         put(img, f"{name.split('_')[-1]} h{C[2]:.2f}", c + [6, 4], GREY, 0.35)
-    put(img, "table map, arm frame (m). yellow = touched markers, magenta = touch error x20, triangles = camera views, "
+    put(img, "table map, table axes (m). yellow = touched markers, magenta = touch error x20, triangles = camera views, "
              "red dots = sweep samples dropped", (8, 16), WHITE, 0.42)
     put(img, f"reproj {sol.report['reproj_rms_px']} px   touches {sol.report['touch_rms_mm']} mm   "
              f"sweep {sol.report['sweep_rms_mm']} mm", (8, 34), WHITE, 0.42)

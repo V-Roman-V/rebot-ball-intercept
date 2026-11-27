@@ -94,20 +94,21 @@ def main() -> int:
                 if p.phase == "tracking":
                     last_cross = p.crossing_y
                 if p.phase == "arrived" and last_phase == "tracking":
-                    print(f"ball at the line: predicted y {last_cross * 100:+.1f} cm, jaw at y {p.jaw[1] * 100:+.1f} cm", flush=True)
+                    print(f"ball at the line: predicted y {last_cross * 100:+.1f} cm, jaw at y {p.jaw_y * 100:+.1f} cm", flush=True)
                 last_phase = p.phase
 
                 img = f.img.copy()
-                a, b = proj([[gx, y, table_z(plane, gx, y)] for y in (-0.30, 0.30)])
+                a, b = proj([planner.line_point(y) for y in (-0.30, 0.30)])
                 cv2.line(img, ipt(a), ipt(b), WHITE, 1)
                 if det is not None:
                     cv2.circle(img, ipt(det.uv), int(max(det.radius_px, 4)) + 3, GREEN, 2)
                 if st is not None and p.crossing_y is not None:
                     c = proj([[*st.pos, table_z(plane, *st.pos) + BALL_R]])[0]
-                    cp = proj([[gx, p.crossing_y, table_z(plane, gx, p.crossing_y) + BALL_R]])[0]
+                    cp = proj([planner.line_point(p.crossing_y, BALL_R)])[0]
                     cv2.line(img, ipt(c), ipt(cp), MAGENTA, 1)
                     cv2.drawMarker(img, ipt(cp), MAGENTA, cv2.MARKER_TILTED_CROSS, 14, 2)
-                jl, jr = proj([p.jaw + [0, -0.03, 0], p.jaw + [0, 0.03, 0]])
+                along = np.r_[rc.arm_xy([[0.0, 0.03]])[0], 0.0]              # 3 cm along the line
+                jl, jr = proj([p.jaw - along, p.jaw + along])
                 cv2.line(img, ipt(jl), ipt(jr), YELLOW, 3)
                 put(img, f"POWERED  {p.phase}" + (f"  crossing y {p.crossing_y * 100:+.1f} cm in {p.t_cross * 1000:.0f} ms"
                                                   if p.crossing_y is not None else ""), (8, 18), YELLOW)

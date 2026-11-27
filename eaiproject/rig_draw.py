@@ -46,9 +46,10 @@ def draw_map(img, rig_map: rc.RigMap, K, dist, rvec, tvec, color=MAGENTA, labels
 
 
 def draw_table_grid(img, K, dist, rvec, tvec, plane, gate_x=0.40, step=0.1):
-    """10 cm grid on the table plane, the base axes and the intercept line."""
+    """10 cm grid on the table plane in table axes (x down the table from the base, rig_calib.BASE_YAW_DEG),
+    and the intercept line."""
     pr = lambda P: rc.project(K, dist, rvec, tvec, np.asarray(P, float))
-    on = lambda x, y: [x, y, float(rc.plane_z(plane, x, y))]
+    on = lambda x, y: rc.line_point(plane, y, 0.0, x)
     for x in np.arange(0.1, 1.01, step):
         a, b = pr([on(x, -0.3), on(x, 0.3)])
         cv2.line(img, ipt(a), ipt(b), CYAN, 1, cv2.LINE_AA)
@@ -68,44 +69,52 @@ def diverging(v: float, vmax: float) -> tuple[int, int, int]:
 
 
 class TopDown:
-    """Top view of the table in the base frame: x (away from the arm) to the right, y up."""
+    """Top view of the table in table axes (x down the table from the base, to the right; y up).
+    px / cell / markers take arm-frame points; canvas, rect and the ranges x, y are in table axes."""
 
     def __init__(self, x=(-0.05, 1.05), y=(-0.42, 0.42), scale=640.0, margin=34):
         self.x, self.y, self.s, self.m = x, y, scale, margin
         self.w = int((x[1] - x[0]) * scale) + 2 * margin
         self.h = int((y[1] - y[0]) * scale) + 2 * margin
 
-    def px(self, xy) -> np.ndarray:
+    def pt(self, xy) -> np.ndarray:
+        """Pixels of table-axes points."""
         xy = np.asarray(xy, float).reshape(-1, 2)
         return np.c_[self.m + (xy[:, 0] - self.x[0]) * self.s, self.m + (self.y[1] - xy[:, 1]) * self.s]
+
+    def px(self, xy) -> np.ndarray:
+        """Pixels of arm-frame points."""
+        return self.pt(rc.table_xy(np.asarray(xy, float).reshape(-1, 2)))
 
     def canvas(self, gate_x: float | None = 0.40) -> np.ndarray:
         img = np.full((self.h, self.w, 3), 32, np.uint8)
         for gx in np.arange(0.0, self.x[1] + 1e-6, 0.1):
-            a, b = self.px([[gx, self.y[0]], [gx, self.y[1]]])
+            a, b = self.pt([[gx, self.y[0]], [gx, self.y[1]]])
             cv2.line(img, ipt(a), ipt(b), (64, 64, 64), 1)
             put(img, f"{gx:.1f}", (a[0] - 10, self.h - 10), GREY, 0.38)
         for gy in np.arange(-0.4, 0.41, 0.1):
-            a, b = self.px([[self.x[0], gy], [self.x[1], gy]])
+            a, b = self.pt([[self.x[0], gy], [self.x[1], gy]])
             cv2.line(img, ipt(a), ipt(b), (64, 64, 64), 1)
             put(img, f"{gy:+.1f}", (2, a[1] + 4), GREY, 0.38)
-        o, ex, ey = self.px([[0, 0], [0.08, 0], [0, 0.08]])
+        o, ex, ey = self.px([[0, 0], [0.08, 0], [0, 0.08]])             # the arm's x (red) and y (green)
         cv2.arrowedLine(img, ipt(o), ipt(ex), RED, 2)
         cv2.arrowedLine(img, ipt(o), ipt(ey), GREEN, 2)
         put(img, "base", o + [4, 18], GREY, 0.4)
         if gate_x is not None:
-            a, b = self.px([[gate_x, -0.30], [gate_x, 0.30]])
+            a, b = self.pt([[gate_x, -0.30], [gate_x, 0.30]])
             cv2.line(img, ipt(a), ipt(b), WHITE, 1, cv2.LINE_AA)
             put(img, f"intercept line x={gate_x:.2f}", a + [6, 14], WHITE, 0.4)
         return img
 
     def cell(self, img, xy, size, color):
-        a = self.px([[xy[0] - size / 2, xy[1] + size / 2]])[0]
-        b = self.px([[xy[0] + size / 2, xy[1] - size / 2]])[0]
+        """A square of `size` (table axes) around the arm-frame point xy."""
+        c = rc.table_xy(np.asarray(xy, float)[:2])
+        a = self.pt([[c[0] - size / 2, c[1] + size / 2]])[0]
+        b = self.pt([[c[0] + size / 2, c[1] - size / 2]])[0]
         cv2.rectangle(img, ipt(a), ipt(b), color, -1)
 
     def rect(self, img, x, y, color, thick=1):
-        a, b = self.px([[x[0], y[1]], [x[1], y[0]]])
+        a, b = self.pt([[x[0], y[1]], [x[1], y[0]]])
         cv2.rectangle(img, ipt(a), ipt(b), color, thick)
 
     def markers(self, img, rig_map: rc.RigMap):

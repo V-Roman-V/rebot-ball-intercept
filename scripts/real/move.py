@@ -28,22 +28,24 @@ from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
 from eaiproject.ball_intercept_env import BallInterceptEnv  # noqa: E402
 from eaiproject.kinematics import Fingertip  # noqa: E402
+from eaiproject.real_intercept import home_pose  # noqa: E402
 
 MAX_IK_ERR = 0.003           # m: passes the arm reaches worse than this run anyway, with a warning
 
 
 def plan(env: BallInterceptEnv, plane, heights, y_max: float, speed: float):
     """[(height, joint path)] along the intercept line, highest first, alternating direction; the
-    path of each pass is eased, peaking at 1.5x `speed`. Also returns the largest IK error (m)."""
-    x, q, err, out = env.gate_x, env.q_home.copy(), 0.0, []
+    path of each pass is eased, peaking at 1.5x `speed`. Also returns the largest IK error (m).
+    y runs along the line in table axes (rig_calib.BASE_YAW_DEG: the arm base's turn on the table)."""
+    q, err, out = home_pose(env, plane, max(heights) - env.jaw_height), 0.0, []
     for i, h in enumerate(sorted(heights, reverse=True)):
         y0, y1 = (-y_max, y_max) if i % 2 == 0 else (y_max, -y_max)
         n = max(int(np.ceil(abs(y1 - y0) * 1.5 / speed * arm_mod.RATE)), 1)
         path = []
         for j, y in enumerate(np.r_[y0, y0 + arm_mod.ease(n) * (y1 - y0)]):
-            z = rc.plane_z(plane, x, y) + h
-            q = env.ik_jaw(x, y, z, yaw=0.0, q0=q, iters=400 if j == 0 else 40)
-            err = max(err, env.jaw_error(q, x, y, z))
+            x, yy, z = rc.line_point(plane, y, h, env.gate_x)
+            q = env.ik_jaw(x, yy, z, yaw=rc.ARM_TURN, q0=q, iters=400 if j == 0 else 40)
+            err = max(err, env.jaw_error(q, x, yy, z))
             path.append(q)
         out.append((h, np.array(path)))
     return out, err
@@ -66,7 +68,8 @@ def main() -> int:
               "it really does); smaller --y or higher --heights fit better")
     cfg = arm_mod.load()
     secs = sum(len(p) for _, p in passes) / arm_mod.RATE
-    print(f"{len(passes)} passes along x = {env.gate_x:.2f} m, y -{args.y:.2f} .. +{args.y:.2f} m, "
+    print(f"{len(passes)} passes along the intercept line ({env.gate_x:.2f} m down the table from the base), "
+          f"{-args.y:+.2f} .. {args.y:+.2f} m along it, "
           f"{', '.join(f'{h * 1000:.0f}' for h, _ in passes)} mm above the table, {secs:.0f} s of passes")
     print("route: " + " -> ".join(["rest" if cfg.rest is not None else "here"] + (["initial"] if cfg.initial is not None else [])
                                   + ["passes"] + (["initial"] if cfg.initial is not None else [])
@@ -83,9 +86,9 @@ def main() -> int:
             arm.follow(path[1:])
             q = arm.go(path[-1], settle=0.5)
             print(f"                end   {height(q):.1f} mm above the table", flush=True)
-        x, y = env.gate_x, float(tip(path[-1])[1])
+        x, y = tip(path[-1])[:2]
         z = rc.plane_z(plane, x, y) + max(passes[0][0], 0.06)
-        arm.go(env.ik_jaw(x, y, z, yaw=0.0, q0=path[-1], iters=400))        # lift straight up first
+        arm.go(env.ik_jaw(x, y, z, yaw=rc.ARM_TURN, q0=path[-1], iters=400))        # lift straight up first
     return 0
 
 

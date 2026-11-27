@@ -45,9 +45,25 @@ _cy, _sy = np.cos(np.radians(BASE_YAW_DEG)), np.sin(np.radians(BASE_YAW_DEG))
 TABLE_FROM_ARM = np.array([[_cy, -_sy], [_sy, _cy]])        # 2D rotation: arm-frame xy -> table axes (x down the table)
 
 
+ARM_TURN = -np.radians(BASE_YAW_DEG)                       # rad: direction of the table's +x, in the arm frame
+# Everything measured (map, plane, camera pose, tracker, joints) is in the arm frame; the intercept
+# line (x = GATE_X), the roll direction (-x) and the jaw's heading are in table axes.
+
+
 def arm_xy(P_table) -> np.ndarray:
     """(N, 2) points in table axes -> arm frame."""
     return np.asarray(P_table, float).reshape(-1, 2) @ TABLE_FROM_ARM
+
+
+def table_xy(v_arm) -> np.ndarray:
+    """Arm-frame xy point(s) or velocity(ies), shape (..., 2+) -> table axes, shape (..., 2)."""
+    return np.asarray(v_arm, float)[..., :2] @ TABLE_FROM_ARM.T
+
+
+def line_point(plane, y: float, dz: float = 0.0, x: float = GATE_X) -> np.ndarray:
+    """Arm-frame (x, y, z) of the point at table axes (x, y) on the table plane, `dz` above it."""
+    ax, ay = arm_xy([[x, y]])[0]
+    return np.array([ax, ay, float(plane_z(plane, ax, ay)) + dz])
 
 
 def arm_box(x_range, y_range) -> tuple:
@@ -706,7 +722,7 @@ def solve_rig(obs: Observations, far_dist: float = FAR_DIST) -> RigSolution:
                   "used": int(use.sum()), "cells": prob.n_cells, "sigma_mm": round(sig * 1000, 2)},
         "sweep_rms_mm": round(rms(sweep) * 1000, 2),
         "plane_z=a+bx+cy": [float(v) for v in plane],
-        "table_on_line_mm": {f"{y:+.2f}": round(float(plane_z(plane, GATE_X, y)) * 1000, 2) for y in (-0.24, 0.0, 0.24)},
+        "table_on_line_mm": {f"{y:+.2f}": round(float(line_point(plane, y)[2]) * 1000, 2) for y in (-0.24, 0.0, 0.24)},
         "far_markers": [k for i, k in enumerate(keys) if np.linalg.norm(P[i, 4, :2]) >= far_dist],
     }
     # Scale check: the camera measures distances in units of the printed marker size, the arm directly.

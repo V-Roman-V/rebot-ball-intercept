@@ -3,7 +3,9 @@
 The planner is the sim's InterceptPolicy logic (straight-line crossing prediction at the intercept
 line, jaw facing the ball, rate limits on the jaw pose, IK in the MuJoCo model) driven by the tracker's
 estimate and wall-clock time instead of sim state. Heights are relative to the MEASURED table plane
-(config/rig_map.json, in the arm's own kinematic frame).
+(config/rig_map.json, in the arm's own kinematic frame). The line, the roll direction and the jaw's
+heading are in table axes (rig_calib.BASE_YAW_DEG: how the arm base is turned on the table); the
+tracker's estimate is turned into them, the jaw target back into the arm frame for the IK.
 It only computes targets; whether they are sent to the motors is the caller's business.
 """
 from __future__ import annotations
@@ -149,16 +151,18 @@ def hsv_from_selection(img_bgr, x0: int, y0: int, x1: int, y1: int):
 @dataclass
 class Plan:
     q: np.ndarray            # arm joint targets (rad)
-    jaw: np.ndarray          # fingertip target (x, y, z) robot frame
-    yaw: float
-    crossing_y: float | None
+    jaw: np.ndarray          # fingertip target (x, y, z), arm frame
+    yaw: float               # jaw heading in table axes (0 = facing up the table, toward the ball)
+    crossing_y: float | None # predicted crossing, table axes (m along the intercept line)
     t_cross: float | None    # seconds until the ball reaches the line
     ik_err: float
     phase: str               # "home" | "tracking" | "arrived"
+    jaw_y: float = 0.0       # the jaw's position along the line, table axes
 
 
 class InterceptPlanner:
-    """Sim InterceptPolicy, real-time version. Call `plan(tracker, now)` every control tick."""
+    """Sim InterceptPolicy, real-time version. Call `plan(tracker, now)` every control tick.
+    Works in table axes (x down the table, the ball rolls toward -x); the IK gets arm-frame targets."""
 
     def __init__(self, plane, mode: str = "forward", max_lateral_speed: float = 0.6, max_yaw_rate: float = 1.5,
                  max_y: float = 0.24, max_yaw: float = 0.6, hover: float = 0.015):
@@ -167,7 +171,8 @@ class InterceptPlanner:
         self.gate_x, self.jaw_height = self.env.gate_x, self.env.jaw_height
         self.v_lat, self.w_yaw = max_lateral_speed, max_yaw_rate
         self.max_y, self.max_yaw, self.hover = max_y, max_yaw, hover
-        self.q_home = self.env.q_home.copy()
+        self.turn = rig_calib.ARM_TURN
+        self.q_home = home_pose(self.env, plane, hover)
         self.reset()
 
     def reset(self):
@@ -179,9 +184,13 @@ class InterceptPlanner:
         return self.jaw_target(0.0, 0.0, far=True)
 
     def jaw_target(self, y, dist, far=False):
-        z_tab = table_z(self.plane, self.gate_x, y)
+        """Arm-frame fingertip target on the intercept line at table y."""
         hover = self.hover if far else self.hover * float(np.clip((dist - 0.10) / 0.20, 0.0, 1.0))
-        return np.array([self.gate_x, y, z_tab + self.jaw_height + hover])
+        return rig_calib.line_point(self.plane, y, self.jaw_height + hover, self.gate_x)
+
+    def line_point(self, y, dz: float = 0.0) -> np.ndarray:
+        """Arm-frame point of the intercept line at table y, `dz` above the table (for drawing)."""
+        return rig_calib.line_point(self.plane, y, dz, self.gate_x)
 
     def plan(self, trk: BallTracker, now: float) -> Plan:
         dt = 0.0 if self.t_last is None else min(now - self.t_last, 0.1)
@@ -189,9 +198,10 @@ class InterceptPlanner:
         st = trk.state_at(now) if trk.ready else None
         cross, t_cross, phase = None, None, "home"
         y_goal, yaw_goal, dist = self.y_cmd, self.yaw_cmd, 1.0
-        if st is not None and st.vel[0] < -0.05:
-            x, y = st.pos
-            vx, vy = st.vel
+        vel = rig_calib.table_xy(st.vel) if st is not None else None
+        if st is not None and vel[0] < -0.05:
+            x, y = rig_calib.table_xy(st.pos)
+            vx, vy = vel
             dist = x - self.gate_x
             if dist < -0.05:
                 phase = "arrived"
@@ -205,7 +215,22 @@ class InterceptPlanner:
             self.y_cmd += float(np.clip(y_goal - self.y_cmd, -self.v_lat * dt, self.v_lat * dt))
             self.yaw_cmd += float(np.clip(yaw_goal - self.yaw_cmd, -self.w_yaw * dt, self.w_yaw * dt))
             jaw = self.jaw_target(self.y_cmd, dist, far=(phase == "home"))
-            self.q_cmd = self.env.ik_jaw(*jaw, yaw=self.yaw_cmd, q0=self.q_cmd, iters=40)
+            self.q_cmd = self.env.ik_jaw(*jaw, yaw=self.yaw_cmd + self.turn, q0=self.q_cmd, iters=40)
         jaw = self.jaw_target(self.y_cmd, dist, far=(phase == "home"))
         err = self.env.jaw_error(self.q_cmd, *jaw)
-        return Plan(self.q_cmd.copy(), jaw, self.yaw_cmd, cross, t_cross, err, phase)
+        return Plan(self.q_cmd.copy(), jaw, self.yaw_cmd, cross, t_cross, err, phase, self.y_cmd)
+
+
+def home_pose(env: BallInterceptEnv, plane, dz: float = 0.0) -> np.ndarray:
+    """Joint pose with the open jaw at the middle of the intercept line, facing up the table, `dz` above
+    the jaw height: the sim's home pose turned at joint 1 by the base's turn, then refined by IK."""
+    jaw = rig_calib.line_point(plane, 0.0, env.jaw_height + dz, env.gate_x)
+    best, best_err = env.q_home.copy(), np.inf
+    for sign in (1.0, -1.0):                     # joint 1's sign in the model: keep the turn that reaches the line
+        seed = env.q_home.copy()
+        seed[0] = float(np.clip(seed[0] + sign * rig_calib.ARM_TURN, env.arm_lo[0], env.arm_hi[0]))
+        q = env.ik_jaw(*jaw, yaw=rig_calib.ARM_TURN, q0=seed, iters=400)
+        err = env.jaw_error(q, *jaw)
+        if err < best_err:
+            best, best_err = q, err
+    return best
