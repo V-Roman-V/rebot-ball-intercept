@@ -122,6 +122,28 @@ def auto_hsv(img_bgr, table_mask=None):
     return lo, hi
 
 
+def hsv_from_selection(img_bgr, x0: int, y0: int, x1: int, y1: int):
+    """HSV range of the ball selected with the mouse: the pixels in the ellipse inside the box
+    (x0, y0)-(x1, y1), image pixels. Same margins as auto_hsv. None if the box holds no pixel."""
+    x0, x1 = sorted((int(x0), int(x1)))
+    y0, y1 = sorted((int(y0), int(y1)))
+    x0, y0 = max(x0, 0), max(y0, 0)
+    x1, y1 = min(x1, img_bgr.shape[1] - 1), min(y1, img_bgr.shape[0] - 1)
+    if x1 < x0 or y1 < y0:
+        return None
+    hsv = cv2.cvtColor(img_bgr[y0:y1 + 1, x0:x1 + 1], cv2.COLOR_BGR2HSV)
+    h, w = hsv.shape[:2]
+    yy, xx = np.mgrid[:h, :w]
+    inside = ((xx + 0.5 - w / 2) / (w / 2)) ** 2 + ((yy + 0.5 - h / 2) / (h / 2)) ** 2 <= 1.0
+    px = hsv[inside] if inside.any() else hsv.reshape(-1, 3)
+    px = px[px[:, 1] >= np.percentile(px[:, 1], 25)]          # drop the greyest quarter: background, highlight
+    hue = np.median(px[:, 0])
+    spread = max(9.0, float(np.percentile(np.abs(px[:, 0].astype(float) - hue), 90)) + 3)
+    lo = (int(max(0, hue - spread)), int(max(40, np.percentile(px[:, 1], 5) - 35)), int(max(40, np.percentile(px[:, 2], 5) - 45)))
+    hi = (int(min(179, hue + spread)), 255, 255)
+    return lo, hi
+
+
 @dataclass
 class Plan:
     q: np.ndarray            # arm joint targets (rad)

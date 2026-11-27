@@ -551,11 +551,23 @@ SLIDERS = (("H lo", 0, 0, 179), ("H hi", 1, 0, 179), ("S lo", 0, 1, 255), ("V lo
 
 def run_ball(cam, sess: Path) -> str:
     """Step 5: the ball colour, seen at the tracking resolution; saved for check / track / catch."""
-    from eaiproject.real_intercept import auto_hsv, camera_calib, hsv_saved_time, load_hsv, locate_camera, make_tracker, save_hsv
+    from eaiproject.real_intercept import (auto_hsv, camera_calib, hsv_from_selection, hsv_saved_time, load_hsv,
+                                           locate_camera, make_tracker, save_hsv)
     saved = tuple(tuple(int(v) for v in x) for x in load_hsv())
     when = hsv_saved_time()
     cur = [list(saved[0]), list(saved[1])]
     seen, msg, last_fn, trk = deque(maxlen=60), "", None, None
+    sel = {"start": None, "now": None, "done": None}   # mouse: drag a box around the ball (window pixels)
+
+    def on_mouse(event, x, y, _flags, _param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            sel["start"] = sel["now"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and sel["start"] is not None:
+            sel["now"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP and sel["start"] is not None:
+            sel["done"], sel["start"] = (sel["start"], (x, y)), None
+
+    cv2.setMouseCallback(WIN, on_mouse)
 
     def set_sliders():
         for name, which, ch, _ in SLIDERS:
@@ -605,12 +617,30 @@ def run_ball(cam, sess: Path) -> str:
                     inset = cv2.resize(cv2.cvtColor(full, cv2.COLOR_GRAY2BGR), (img.shape[1] // 3, img.shape[0] // 3))
                     img[-inset.shape[0] - 40:-40, -inset.shape[1]:] = inset
                     put(img, "colour mask", (img.shape[1] - inset.shape[1] + 4, img.shape[0] - inset.shape[0] - 46), WHITE, 0.4)
+            if sel["start"] is not None:                # dragging: show the box
+                cv2.rectangle(img, sel["start"], sel["now"], MAGENTA, 1, cv2.LINE_AA)
+            if sel["done"] is not None and trk is not None:
+                (ax, ay), (bx, by) = sel["done"]
+                sel["done"] = None
+                if abs(bx - ax) < 6 and abs(by - ay) < 6:       # a click: a small disc around it
+                    r = 8 * sc
+                    ax, ay, bx, by = ax - r, ay - r, ax + r, ay + r
+                res_sel = hsv_from_selection(f.img, ax / sc, ay / sc, bx / sc, by / sc)
+                if res_sel is None:
+                    msg = "selection outside the image: drag a box around the ball"
+                else:
+                    cur[:] = [list(res_sel[0]), list(res_sel[1])]
+                    set_sliders()
+                    msg = f"from the selection: lo {tuple(cur[0])} hi {tuple(cur[1])}; roll the ball to check"
+            elif sel["done"] is not None:
+                sel["done"] = None
+                msg = "locate the camera first (c), then select the ball"
             changed = (tuple(cur[0]), tuple(cur[1])) != saved
             put(img, f"5 BALL COLOUR ({cam.width}x{cam.height}, as for tracking): " +
                 (f"saved {when}" if when else "default (never saved)") +
                 (" - CHANGED, saved when you leave" if changed else " - ENTER keeps it"), (10, 24), YELLOW, 0.55)
-            put(img, "ball ALONE on the table, still: a = auto-tune. Then roll it: the ring must follow it, the mask must "
-                     "show only the ball", (10, 48), WHITE, 0.45)
+            put(img, "MOUSE: drag a box around the ball (or click on it) = its colour.  a = auto-tune.  Then roll it: "
+                     "the ring must follow it, the mask must show only the ball", (10, 48), WHITE, 0.45)
             put(img, f"found in {100 * np.mean(seen) if seen else 0:.0f} % of the last 2 s   lo {tuple(cur[0])} hi {tuple(cur[1])}   "
                      "sliders: 'ball colour' window   u saved colour   c locate camera", (10, 70), WHITE, 0.45)
             footer(img, msg)
@@ -637,6 +667,7 @@ def run_ball(cam, sess: Path) -> str:
             if key == ord("c") and rc.MAP_PATH.exists():
                 locate()
     finally:
+        cv2.setMouseCallback(WIN, lambda *_: None)    # the other steps share the window
         if trk is not None:
             cv2.destroyWindow(BALL_WIN)
 
