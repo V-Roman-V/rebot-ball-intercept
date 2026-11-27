@@ -21,8 +21,9 @@ Intel RealSense D435i.
 | Simulation: vision in the loop (camera model + classic CV tracker) | ✅ 100/100, 2-3 mm error, robust to 30 fps / 100 ms latency |
 | Real arm: CAN link, joint readout, model match | ✅ |
 | Real camera: 60 fps stream, located from table markers mapped in the arm's frame | ✅ 0.6 px, touches 1.7 mm |
-| Real tracking in shadow mode (arm unpowered) | 🔧 ready, being tested |
-| Powered: jaw along the intercept line, interception (all joints, motor position mode) | 🔧 ready for the first runs |
+| Real tracking in shadow mode (arm unpowered) | ✅ tested on the rig |
+| Powered: jaw along the intercept line (all joints, motor position mode) | ✅ tested on the rig |
+| Powered: interception of a rolled ball (MIT mode: sim PD gains + gravity feed-forward) | ✅ first real catches, 27 Nov 2026: the jaw within its ±28 mm catch width for 23 of 26 rolls inside its reach; rolls faster than 0.6 m/s are still missed |
 
 ## Repository layout
 
@@ -34,7 +35,7 @@ eaiproject/                     Python package
   real_intercept.py             real rig: camera pose from the table map, tracker setup, real-time planner
   rig_calib.py                  table map: markers and table plane in the arm's frame; camera relocalisation
   rig_report.py, rig_draw.py    calibration report and drawing helpers
-  arm.py                        real arm: wrist zero, rest / initial poses, position-mode control
+  arm.py                        real arm: wrist zero, rest / initial poses, joint limits, position- and MIT-mode control
   robstride.py                  RobStride CAN protocol over PEAK PCAN-USB (with a motor allow-list)
   realsense_client.py           client for the RealSense frame server
   kinematics.py, markers.py     FK from joint readings, ArUco table markers
@@ -122,10 +123,9 @@ right): the map works out the turn from where the markers lie, nothing to set.
    - `./rig track`: roll the ball a few times. The predicted crossing should land where the ball
      crosses the line; `q` prints the prediction error over the rolls (the open jaw catches within
      ±28 mm).
-7. **Powered tests:** `./rig move --heights 60`. It prints how far each joint turns on the way to
-   the first pass (`--dry-run` prints that and stops); ENTER powers the arm, and the jaw passes
-   along the intercept line 60 mm above the table: check the printed height with a ruler. Then
-   `./rig move` for 60 / 35 / 20 mm.
+7. **Powered tests:** `./rig move --heights 60`, ENTER powers the arm, and the jaw passes along the
+   intercept line 60 mm above the table: check the printed height with a ruler. Then `./rig move`
+   for 60 / 35 / 20 mm.
 8. **Catch:** `./rig catch`. Wait for `camera located: OK`, press ENTER in the terminal: the arm goes
    from rest to the initial pose, opens the gripper and waits at the intercept line. Roll the ball.
    `q` in the window brings the arm back to rest and releases it.
