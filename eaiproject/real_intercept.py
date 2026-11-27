@@ -66,12 +66,21 @@ def on_table(calib: CameraCalib, plane) -> CameraCalib:
                        calib.width, calib.height)
 
 
+def hsv_ok(lo, hi) -> bool:
+    """A colour range that can match something: every low limit at or below its high limit."""
+    return all(int(a) <= int(b) for a, b in zip(lo, hi))
+
+
 def load_hsv():
-    """Ball colour range (HSV lo, hi) saved by ./rig calibrate (step 5), else a default for an orange ball."""
+    """Ball colour range (HSV lo, hi) saved by ./rig calibrate (step 5), else a default for an orange
+    ball. A saved range that can match nothing (a low limit above its high one) is not used."""
     p = CAL_DIR / "ball_hsv.json"
     if p.exists():
         d = json.loads(p.read_text())
-        return tuple(d["lo"]), tuple(d["hi"])
+        if hsv_ok(d["lo"], d["hi"]):
+            return tuple(d["lo"]), tuple(d["hi"])
+        print(f"CHECK: the saved ball colour lo {d['lo']} hi {d['hi']} matches nothing: using the default. "
+              "Set it again: ./rig calibrate --step ball", flush=True)
     return DEFAULT_HSV
 
 

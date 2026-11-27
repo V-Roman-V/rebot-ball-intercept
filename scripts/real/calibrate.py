@@ -563,7 +563,7 @@ SLIDERS = (("H lo", 0, 0, 179), ("H hi", 1, 0, 179), ("S lo", 0, 1, 255), ("V lo
 
 def run_ball(cam, sess: Path) -> str:
     """Step 5: the ball colour, seen at the tracking resolution; saved for check / track / catch."""
-    from eaiproject.real_intercept import (auto_hsv, camera_calib, hsv_from_selection, hsv_saved_time, load_hsv,
+    from eaiproject.real_intercept import (auto_hsv, camera_calib, hsv_from_selection, hsv_ok, hsv_saved_time, load_hsv,
                                            locate_camera, make_tracker, save_hsv)
     saved = tuple(tuple(int(v) for v in x) for x in load_hsv())
     when = hsv_saved_time()
@@ -661,9 +661,11 @@ def run_ball(cam, sess: Path) -> str:
                 sel["done"] = None
                 msg = "locate the camera first (c), then select the ball"
             changed = (tuple(cur[0]), tuple(cur[1])) != saved
+            usable = hsv_ok(*cur)
             put(img, f"5 BALL COLOUR ({cam.width}x{cam.height}, as for tracking): " +
                 (f"saved {when}" if when else "default (never saved)") +
-                (" - CHANGED, saved when you leave" if changed else " - ENTER keeps it"), (10, 24), YELLOW, 0.55)
+                (" - a LOW limit is above its HIGH limit: nothing can match, it will NOT be saved" if not usable else
+                 " - CHANGED, saved when you leave" if changed else " - ENTER keeps it"), (10, 24), YELLOW if usable else RED, 0.55)
             put(img, "MOUSE: drag a box around the ball (or click on it) = its colour.  a = auto-tune.  Then roll it: "
                      "the ring must follow it, the mask must show only the ball", (10, 48), WHITE, 0.45)
             put(img, f"found in {100 * np.mean(seen) if seen else 0:.0f} % of the last 2 s   lo {tuple(cur[0])} hi {tuple(cur[1])}   "
@@ -673,9 +675,12 @@ def run_ball(cam, sess: Path) -> str:
             key = cv2.waitKey(1) & 0xFF
             go = nav(key)
             if go:
-                if changed:
+                if changed and usable:
                     save_hsv(*cur)
                     print(f"ball colour saved: lo {tuple(cur[0])} hi {tuple(cur[1])}", flush=True)
+                elif changed:
+                    print(f"CHECK: ball colour NOT saved: lo {tuple(cur[0])} hi {tuple(cur[1])} matches nothing "
+                          "(a low limit above its high limit). The saved colour is kept.", flush=True)
                 return go
             if key == ord("a") and trk is not None:
                 r = auto_hsv(f.img, trk.table_mask)
