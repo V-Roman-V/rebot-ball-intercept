@@ -150,15 +150,36 @@ def detect_with_map(img_bgr: np.ndarray, rig_map: "RigMap", K, dist, pose=None) 
     return {**found, **extra}, sorted(extra)
 
 
-def average_corners(frames: list[dict], min_frac: float = 0.7) -> tuple[dict, dict]:
-    """Mean corners over frames for markers seen in >= min_frac of them, and their jitter (max std, px)."""
+def average_corners(frames: list[dict], min_frac: float = 0.3, min_n: int = 5) -> tuple[dict, dict]:
+    """Median corners over frames for the markers read often enough, and their jitter (px).
+
+    A small or far marker is not read in every frame (at 640x480 a far marker is ~25 px wide, about
+    3 px per cell: the detector's limit), so it flickers. It still counts when it was read in at
+    least min_frac of the frames and min_n times (in all frames when there are fewer than min_n).
+    The median ignores an occasional wrong reading; the jitter is the largest corner standard
+    deviation over the readings within 2 px of the median."""
     acc: dict[str, list] = {}
     for found in frames:
         for k, c in found.items():
             acc.setdefault(k, []).append(np.asarray(c, float).reshape(4, 2))
-    keep = {k: v for k, v in acc.items() if len(v) >= max(1, min_frac * len(frames))}
-    return ({k: np.mean(v, axis=0) for k, v in keep.items()},
-            {k: float(np.std(v, axis=0).max()) for k, v in keep.items()})
+    need = max(1, min(len(frames), max(min_n, int(np.ceil(min_frac * len(frames))))))
+    mean, jitter = {}, {}
+    for k, v in acc.items():
+        if len(v) < need:
+            continue
+        v = np.array(v)
+        med = np.median(v, axis=0)
+        near = np.abs(v - med).max(axis=(1, 2)) <= 2.0
+        mean[k] = med
+        jitter[k] = float(np.std(v[near], axis=0).max()) if near.sum() > 1 else 0.0
+    return mean, jitter
+
+
+def read_rates(frames: list[dict]) -> dict:
+    """Marker -> fraction of the frames in which it was read."""
+    n = max(len(frames), 1)
+    keys = {k for f in frames for k in f}
+    return {k: sum(k in f for f in frames) / n for k in sorted(keys)}
 
 
 # ----------------------------------------------------------------------------------- plane

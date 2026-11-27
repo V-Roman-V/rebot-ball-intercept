@@ -116,13 +116,15 @@ def big(img, width: int = 1280) -> tuple[np.ndarray, float]:
 
 
 def grab_average(cam, last_fn, n: int = N_FRAMES, timeout: float = 4.0):
-    """Average table-marker corners over n fresh frames. Returns (mean, jitter, n_frames, last frame)."""
+    """Table-marker corners over n fresh frames. Returns (corners, jitter, n_frames, last frame);
+    grab_average.rates then holds how often each marker was read (a flickering marker still counts)."""
     frames, fn, t_end, g = [], last_fn, time.monotonic() + timeout, None
     while len(frames) < n and time.monotonic() < t_end:
         g = cam.read(timeout=2.0, newer_than=fn)
         fn = g.frame_number
         frames.append(markers.detect(g.img))
     mean, jitter = rc.average_corners(frames)
+    grab_average.rates = rc.read_rates(frames)
     return mean, jitter, len(frames), g
 
 
@@ -143,17 +145,22 @@ def run_views(cam, sess: Path) -> str:
     path = sess / "views.json"
     views = json.loads(path.read_text())["views"] if path.exists() else []
     msg, last_fn = "", None
+    recent: deque = deque(maxlen=N_FRAMES)             # the last detections: a far marker is not read in every frame
     while True:
         f = cam.read(timeout=2.0, newer_than=last_fn)
         last_fn = f.frame_number
         img = f.img.copy()
-        found = markers.detect(f.img)
-        for k, c in found.items():
-            outline(img, c, GREEN, 2, k)
+        recent.append(markers.detect(f.img))
+        rates = rc.read_rates(list(recent))
+        steady = {k: r for k, r in rates.items() if r >= 0.3}          # what a recording would keep
+        for k in steady:
+            c = next(d[k] for d in reversed(recent) if k in d)         # its latest reading: no flicker on screen
+            outline(img, c, GREEN if steady[k] >= 0.7 else YELLOW, 2, f"{k} {100 * steady[k]:.0f}%")
         n = len(views)
         put(img, f"1 VIEWS: {n} recorded ({rc.MIN_VIEWS}+ wanted, 6-8 is better). Hands + arm off the markers, camera still, SPACE",
             (10, 24), YELLOW if n < rc.MIN_VIEWS else GREEN)
-        put(img, f"markers in view: {len(found)}  {sorted(found)}", (10, 48), GREEN if len(found) >= 3 else YELLOW)
+        put(img, f"markers in view: {len(steady)}  {sorted(steady)}   (% = read in the last {len(recent)} frames; yellow = small "
+                 "in the image, closer is better)", (10, 48), GREEN if len(steady) >= 3 else YELLOW, 0.45)
         seen = {k: sum(k in v["corners"] for v in views) for k in markers.SIZES}
         put(img, "views per marker: " + "  ".join(f"{k}: {c}" for k, c in seen.items()), (10, 72))
         put(img, "then move the camera: left / right / front, low (30 deg) to high (60 deg), near and far   (u = undo)",
@@ -178,9 +185,13 @@ def run_views(cam, sess: Path) -> str:
             views.append({"name": name, "time": time.strftime("%Y-%m-%d %H:%M:%S"), "serial": cam.serial,
                           "width": cam.width, "height": cam.height, "K": cam.K.tolist(), "dist": cam.dist.tolist(),
                           "n_frames": nf, "corners": {k: c.tolist() for k, c in mean.items()},
+                          "read_rate": {k: round(grab_average.rates.get(k, 0.0), 2) for k in mean},
                           "jitter_px": {k: round(j, 3) for k, j in jitter.items()}, "frame": f"{name}.png"})
             path.write_text(json.dumps({"views": views}, indent=1))
+            weak = [k for k in mean if grab_average.rates.get(k, 1.0) < 0.7]
             notes = ([f"only {len(mean)} marker(s) in this view (3+ link the map better)"] if len(mean) < 3 else []) + \
+                    ([f"marker {', '.join(weak)} read in under 70 % of the frames (small in the image: a closer view reads better)"]
+                     if weak else []) + \
                     ([f"corners moved {max(jitter.values()):.2f} px while averaging (camera still?)"]
                      if max(jitter.values()) > MAX_JITTER_PX else [])
             msg = f"CHECK {name}: " + "; ".join(notes) + "  (u = undo)" if notes else ""

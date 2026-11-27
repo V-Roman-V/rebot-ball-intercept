@@ -27,7 +27,7 @@ def main() -> int:
     except OSError:
         print("Camera server not running: ./rig camera start")
         return 2
-    win = "camera (q quit, s snapshot)"
+    win = "camera (q quit, s snapshot, b burst of 60 frames)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     k = 2 if cam.width < 900 else 1
     cv2.resizeWindow(win, cam.width * k, cam.height * k)
@@ -48,6 +48,17 @@ def main() -> int:
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27) or window_closed(win) or cli.ctrl_c():
             break
+        if key == ord("b"):                              # a burst of raw frames, to tune the marker detection offline
+            out = ROOT / "outputs" / "frames" / time.strftime("%Y%m%d_%H%M%S")
+            out.mkdir(parents=True, exist_ok=True)
+            fn, n_read = last_fn, []
+            for i in range(60):
+                g = cam.read(timeout=2.0, newer_than=fn)
+                fn = g.frame_number
+                cv2.imwrite(str(out / f"{i:03d}.png"), g.img)
+                n_read.append(len(markers.detect(g.img)))
+            last_fn = fn
+            print(f"saved 60 frames to {out}: markers read per frame min {min(n_read)}, mean {sum(n_read) / len(n_read):.1f}", flush=True)
         if key == ord("s"):
             out = ROOT / "outputs" / "snapshots"
             out.mkdir(parents=True, exist_ok=True)
