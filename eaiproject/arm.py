@@ -293,6 +293,21 @@ def _ctrl_c_after():
         raise KeyboardInterrupt
 
 
+# Joints whose target may be any equivalent angle: joint 1 turns all the way round (360 deg), and the
+# two-finger gripper is the same rolled half a turn at joint 6 (180 deg: same fingertip point, same
+# approach, the fingers swap sides). Targets go to the equivalent nearest the arm, so a recorded pose
+# of e.g. 267 deg and a planned -90 deg mean the same place, not a 357 deg swing.
+SAME_EVERY = {0: 2 * np.pi, 5: np.pi}            # joint index -> period (rad)
+
+
+def nearest(q, ref) -> np.ndarray:
+    """`q` with joints 1 and 6 moved by whole periods to the angle nearest `ref` (model angles)."""
+    q = np.array(q, float)
+    for j, per in SAME_EVERY.items():
+        q[j] += per * np.round((ref[j] - q[j]) / per)
+    return q
+
+
 def ease(n: int) -> np.ndarray:
     """n fractions from just above 0 to 1 that start and end at rest (smoothstep)."""
     u = np.linspace(0.0, 1.0, n + 1)[1:]
@@ -301,7 +316,8 @@ def ease(n: int) -> np.ndarray:
 
 class Arm:
     """The six arm motors in the motors' position mode. Angles are MODEL angles; the offset is
-    applied here, at the motor boundary."""
+    applied here, at the motor boundary. Joints 1 and 6 go to the equivalent angle nearest the arm
+    (see SAME_EVERY)."""
 
     def __init__(self, cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, caps: dict | None = None):
         from .robstride import RobStrideBus
@@ -309,6 +325,7 @@ class Arm:
         self.rs = rs if rs is not None else RobStrideBus(movable=ARM_IDS)
         self.speed, self.caps = speed, dict(caps or CUR_CAP)
         self.enabled = False
+        self.last = None                                  # last target sent (model), for nearest()
 
     def read(self) -> np.ndarray:
         q = []
@@ -338,18 +355,22 @@ class Arm:
                 self.rs.write_param_f32(m, P_LIMIT_CUR, self.caps[m])
                 self.rs.write_param_f32(m, P_LOC_REF, float(qm))
             time.sleep(0.01)
+            self.last = q
             self.enabled = True
             for m in (6, 5, 4, 1, 3, 2):                 # the joints carrying the arm last
                 self.rs.enable(m)
         return q
 
     def command(self, q) -> None:
+        q = np.asarray(q, float) if self.last is None else nearest(q, self.last)
+        self.last = q
         for m, v in zip(ARM_IDS, self.cfg.to_motor(q)):
             self.rs.write_param_f32(m, P_LOC_REF, float(v))
 
     def hold(self) -> np.ndarray:
         """Hold where the arm is now."""
         q = self.read()
+        self.last = q
         self.command(q)
         return q
 
@@ -364,7 +385,9 @@ class Arm:
     def go(self, q, speed: float | None = None, settle: float = 0.3) -> np.ndarray:
         """Straight joint-space move from where the arm is to `q`: eased, the fastest joint peaking at
         `speed` (default MOVE_SPEED), streamed at RATE. Returns the pose reached after `settle` seconds."""
-        q0, q1 = self.read(), np.asarray(q, float)
+        q0 = self.read()
+        q1 = nearest(q, q0)
+        self.last = q0
         n = max(int(np.ceil(np.abs(q1 - q0).max() * 1.5 / (speed or MOVE_SPEED) * RATE)), 1)   # smoothstep: 1.5x the mean
         self.follow(q0 + ease(n)[:, None] * (q1 - q0))
         time.sleep(settle)
