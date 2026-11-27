@@ -85,6 +85,10 @@ class PoweredScriptsTest(SimRigCase):
         arrived = np.flatnonzero(log["phase"] == 2)
         self.assertGreater(len(arrived), 0)
         self.assertLess(abs(log["jaw"][arrived[0], 1] - y_cross) * 1000, 10.0, out)
+        self.assertIn("1 rolls: 1 of the 1 inside the reach in the jaw", out)     # the roll's score at the end
+        roll = log["rolls"][0]
+        self.assertLess(abs(roll[1] - y_cross) * 1000, 10.0, out)               # where the ball crossed
+        self.assertLess(abs(roll[2] - roll[1]) * 1000, 28.0, out)               # the jaw was there
         self.assertIn("control: mit", out)
         self.assertEqual(set(self.bus.gains), set(arm.ARM_IDS))                  # driven with MIT frames
         self.assertIn("gripper open", out)

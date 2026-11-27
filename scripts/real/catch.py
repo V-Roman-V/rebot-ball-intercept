@@ -19,7 +19,9 @@ intercept line instead of letting a limit cut the targets, so the jaw keeps its 
 the controller of the system-identification run, so its fitted sim parameters describe this arm; the
 torque is capped in the motors. --control position: the motors' own position mode and current cap.
 In both, the arm's own speed limit is a backstop 25 % above --joint-speed.
-Commands and ball states are saved to outputs/hardware/catch_<time>.npz.
+Each roll is scored when the ball reaches the line: where it crossed against where the jaw was (the
+measured joints in MIT control, the commanded pose otherwise), and a summary is printed at the end.
+Commands, ball states and the roll scores are saved to outputs/hardware/catch_<time>.npz.
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 from eaiproject import cli  # noqa: E402
 from eaiproject import arm as arm_mod  # noqa: E402
 from eaiproject import rig_calib as rc  # noqa: E402
+from eaiproject.kinematics import Fingertip  # noqa: E402
 from eaiproject.real_intercept import (BALL_R, HostClock, InterceptPlanner, camera_calib, locate_camera,  # noqa: E402
                                        make_tracker, table_z)
 from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, WHITE, YELLOW, ipt, open_window, put, show_note,  # noqa: E402
@@ -45,6 +48,7 @@ from eaiproject.rig_draw import (GREEN, GREY, MAGENTA, WHITE, YELLOW, ipt, open_
 
 WIN = "catch (q finish, r reset)"
 PHASES = ("home", "tracking", "arrived")
+JAW_HALF = 0.028             # m: the open jaw catches a ball within this of its middle
 BACKSTOP = 1.25              # the arm's own speed limit / the planner's: the planner shapes the motion, not the limit
 
 
@@ -86,6 +90,7 @@ def main() -> int:
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
     log = {k: [] for k in ("t", "ball", "meas", "ball_px", "jaw", "q", "q_sent", "q_meas", "phase")}
+    rolls, tip = [], Fingertip()          # per roll: time, ball y at the line, jaw y, ball speed, crossing seen (1) or predicted (0)
     show_note(WIN, "ENTER in the terminal powers the arm; the picture starts when it waits at the line", *size)
     try:
         print(f"control: {args.control}", flush=True)
@@ -94,6 +99,11 @@ def main() -> int:
             trk.reset()
             planner.reset()
             last_fn, last_phase, last_cross, last_meas_t = None, "home", None, None
+            seen, speed = None, 0.0               # this roll: (ball y, jaw y) when the ball was seen crossing; its speed
+
+            def jaw_y(p):                         # where the jaw is, along the line (table y)
+                q = arm.measured() if args.control == "mit" else p.q
+                return float(planner.frame.table_xy(tip(q if np.all(np.isfinite(q)) else p.q))[1])
             print("following the ball: roll it. q in the window finishes, Ctrl+C in the terminal holds", flush=True)
             while True:
                 f = cam.read(timeout=2.0, newer_than=last_fn)
@@ -117,9 +127,21 @@ def main() -> int:
                 log["q_meas"].append(arm.measured() if args.control == "mit" else np.full(6, np.nan))
                 log["phase"].append(PHASES.index(p.phase))
                 if p.phase == "tracking":
-                    last_cross = p.crossing_y
+                    last_cross, speed = p.crossing_y, float(np.linalg.norm(st.vel))
+                if new is not None and len(trk.history) >= 2:        # seen on both sides of the line: where it crossed
+                    a, b = (planner.frame.table_xy(xy) for _, xy in trk.history[-2:])
+                    if b[0] < gx <= a[0]:
+                        seen = (float(a[1] + (a[0] - gx) / (a[0] - b[0]) * (b[1] - a[1])), jaw_y(p))
                 if p.phase == "arrived" and last_phase == "tracking":
-                    print(f"ball at the line: predicted y {last_cross * 100:+.1f} cm, jaw at y {p.jaw_y * 100:+.1f} cm", flush=True)
+                    ball_y, jaw = seen if seen is not None else (last_cross, jaw_y(p))
+                    off = (jaw - ball_y) * 1000
+                    rolls.append((now, ball_y, jaw, speed, float(seen is not None)))
+                    print(f"ball at the line: roll {len(rolls)}, {speed:.2f} m/s, crossed y {ball_y * 100:+.1f} cm"
+                          f"{'' if seen is not None else ' (predicted)'}, jaw at y {jaw * 100:+.1f} cm: {off:+.0f} mm, "
+                          + ("in the jaw" if abs(off) <= JAW_HALF * 1000 else
+                             "beyond the reach" if abs(ball_y) > planner.max_y + JAW_HALF else "MISSED"), flush=True)
+                if p.phase != "tracking" and last_phase != "tracking":
+                    seen = None
                 last_phase = p.phase
 
                 img = f.img.copy()
@@ -153,7 +175,18 @@ def main() -> int:
             log_dir = rc.OUT_DIR.parent / "hardware"                  # outputs/hardware
             log_dir.mkdir(parents=True, exist_ok=True)
             out = log_dir / f"catch_{time.strftime('%Y%m%d_%H%M%S')}.npz"
-            np.savez(out, **{k: np.array(v) for k, v in log.items()}, plane=plane)
+            np.savez(out, **{k: np.array(v) for k, v in log.items()}, plane=plane, rolls=np.array(rolls).reshape(-1, 5))
+            if rolls:
+                R = np.array(rolls)
+                off, reach = np.abs(R[:, 2] - R[:, 1]), np.abs(R[:, 1]) <= planner.max_y + JAW_HALF
+                ok = off <= JAW_HALF
+                print(f"{len(R)} rolls: {int((ok & reach).sum())} of the {int(reach.sum())} inside the reach in the jaw "
+                      f"(within {JAW_HALF * 1000:.0f} mm), {int((~reach).sum())} beyond the reach")
+                for lo, hi in ((0.0, 0.5), (0.5, 0.8), (0.8, 9.9)):
+                    m = reach & (R[:, 3] >= lo) & (R[:, 3] < hi)
+                    if m.any():
+                        print(f"  {lo:.1f}-{hi:.1f} m/s: {int((ok & m).sum())}/{int(m.sum())}, median miss {np.median(off[m]) * 1000:.0f} mm"
+                              .replace("-9.9 m/s", " m/s and faster"))
             print("saved", out)
     return 0
 
