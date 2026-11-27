@@ -329,6 +329,34 @@ def nearest(q, ref) -> np.ndarray:
     return q
 
 
+ROUTE_CHECK = np.radians(120.0)       # a joint turning more than this between two poses of the route gets a CHECK
+
+
+def route_lines(cfg: "ArmConfig", start=None, first=None, start_name: str = "here") -> list[str]:
+    """What a powered task does before its work, as text: `start` (model angles; None = not known) ->
+    the initial pose -> `first` (the first pose of the work), with the joint that turns most on each
+    leg. Every pose is taken as go() takes it: joints 1 and 6 at the equivalent angle nearest the pose
+    before. A joint turning more than ROUTE_CHECK adds a CHECK line: no planned move here is that
+    large, so the recorded poses or the wrist zero probably do not belong to the arm as it stands."""
+    stops = [] if start is None else [(start_name, np.asarray(start, float))]
+    if cfg.initial is not None:
+        stops.append(("initial pose", cfg.initial_model()))
+    if first is not None:
+        stops.append(("first target", np.asarray(first, float)))
+    if len(stops) < 2:
+        return []
+    text, checks, (name0, q0) = stops[0][0], [], stops[0]
+    for name, q in stops[1:]:
+        q = nearest(q, q0)
+        turn = np.abs(q - q0)
+        j = int(turn.argmax())
+        text += f" -> {name} (joint {j + 1} turns most: {np.degrees(turn[j]):.0f} deg)"
+        checks += [f"CHECK: joint {k + 1} turns {np.degrees(turn[k]):.0f} deg from {name0} to {name}: are the arm poses and "
+                   "the wrist zero today's (./rig calibrate, step 4)?" for k in np.flatnonzero(turn > ROUTE_CHECK)]
+        name0, q0 = name, q
+    return ["to start: " + text] + checks
+
+
 def ease(n: int) -> np.ndarray:
     """n fractions from just above 0 to 1 that start and end at rest (smoothstep)."""
     u = np.linspace(0.0, 1.0, n + 1)[1:]
@@ -560,11 +588,13 @@ class Arm:
 
 @contextmanager
 def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=None, grip: float | None = None,
-            control: str = "position"):
+            control: str = "position", first=None):
     """ENTER -> power on -> initial pose -> the caller's work -> initial pose -> rest pose -> release.
     `control`: "position" (the motors' position mode) or "mit" (see MIT_KP / Arm).
     Without recorded poses it starts and ends where the arm was resting. `grip` (motor rad): at the
     initial pose the gripper opens to it and stays powered until the release (None: not touched).
+    `first`: the first pose the work goes to (model angles), for the route printed before the ENTER
+    prompt (route_lines, from where the arm really is: read only).
 
     Ctrl+C (or an error) holds the arm where it is. Then ENTER takes it back to rest (through the
     initial pose) and releases it there, and the caller goes on after its `with` (saves its log); if
@@ -576,6 +606,8 @@ def powered(cfg: ArmConfig | None = None, rs=None, speed: float = SPEED, ask=Non
     arm = Arm(cfg, rs, speed, gripper=grip is not None, control=control)
     working, rest = False, None
     try:
+        for line in route_lines(cfg, arm.read(), first):
+            print(line, flush=True)
         ask("Arm clear? ENTER powers it (Ctrl+C holds it, a second Ctrl+C drops it)... ")
         start = arm.enable()
         rest = start if cfg.rest is None else cfg.rest_model()

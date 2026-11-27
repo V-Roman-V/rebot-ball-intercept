@@ -234,6 +234,9 @@ class ArmTest(unittest.TestCase):
 class PoweredTest(unittest.TestCase):
     CFG = arm.ArmConfig(ROLL15, REST.copy(), INIT.copy())
 
+    def setUp(self):
+        self.enterContext(redirect_stdout(io.StringIO()))                       # the route lines powered() prints
+
     def test_route_rest_initial_work_initial_rest(self):
         bus, asks = FakeBus(REST), []
         with no_sleep(), arm.powered(self.CFG, bus, ask=asks.append) as a:
@@ -255,6 +258,26 @@ class PoweredTest(unittest.TestCase):
             a.go(rest - np.radians([360.0, 0, 0, 0, 0, 180.0]))
         T = np.array(bus.targets)
         self.assertLess(np.abs(T - rest).max(), 1e-9)
+
+    def test_route_is_printed_before_the_enter_prompt(self):
+        bus, out, seen = FakeBus(REST), io.StringIO(), []
+        ask = lambda s: seen.append(out.getvalue())                             # what was printed when it asked
+        with no_sleep(), redirect_stdout(out), arm.powered(self.CFG, bus, ask=ask, first=WORK) as a:
+            a.go(WORK)
+        self.assertIn("to start: here -> initial pose (joint 2 turns most: 52 deg) -> first target", seen[0])
+        self.assertNotIn("CHECK", seen[0])
+
+    def test_route_counts_equivalent_angles_and_checks_a_large_turn(self):
+        rest = np.radians([267.2, 0.4, 0.0, -0.1, 1.1, 211.5])                  # motor readings of the turned base
+        cfg = arm.ArmConfig(np.zeros(6), rest, rest + np.radians([0, 80.0, 25.0, 40.0, 0, 0]))
+        first = cfg.initial_model() - np.radians([360.0 - 10.0, 0, 0, 0, 0, 180.0])   # -83 deg at joint 1: 10 deg away
+        lines = arm.route_lines(cfg, cfg.rest_model(), first, "rest pose")
+        self.assertEqual(lines, ["to start: rest pose -> initial pose (joint 2 turns most: 80 deg) -> "
+                                 "first target (joint 1 turns most: 10 deg)"])
+        lines = arm.route_lines(cfg, cfg.rest_model() + np.radians([0, 0, 0, 170.0, 0, 0]), first)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("CHECK: joint 4 turns 130 deg from here to initial pose", lines[1])
+        self.assertEqual(arm.route_lines(arm.ArmConfig(), REST), [])            # no recorded pose, no target: nothing to say
 
     def test_without_poses_it_ends_where_it_started(self):
         start = INIT + 0.05

@@ -1,12 +1,14 @@
 """Powered interception: the arm blocks the rolling ball with its open jaw.
 
     ./rig catch                         # the camera is switched to 640x480 @ 60
+    ./rig catch --dry-run               # the route to the waiting pose only: no camera, no CAN
 
 Before: the table map and today's arm and ball steps (./rig calibrate). The camera is located from
 the table markers (hands off them). ENTER powers the arm: rest -> initial pose, where the gripper
 opens (--grip, motor rad; --grip 0 leaves it alone: open it by hand) -> the waiting pose at the
 intercept line; then the jaw
-follows the planner (the simulation's policy on the tracked ball). Roll the ball.
+follows the planner (the simulation's policy on the tracked ball). Roll the ball. Before the ENTER
+prompt it prints how far the joints turn on the way to the waiting pose (a CHECK above 120 deg).
 
 Keys (window): q finish (initial pose -> rest -> release), r reset the tracker.
 Ctrl+C in the terminal holds the arm where it is; ENTER then takes it back to rest and releases it,
@@ -56,6 +58,7 @@ def main() -> int:
                     help="mit: the sim's PD gains + gravity feed-forward (as identified); position: the motors' own loop")
     ap.add_argument("--joint-speed", type=float, default=3.0,
                     help="fastest joint motion the planner asks for (rad/s); the arm's own limit is set 25 %% above it")
+    ap.add_argument("--dry-run", action="store_true", help="print the route from the recorded rest pose to the waiting pose, then stop")
     args = ap.parse_args()
     from eaiproject.realsense_client import RealSenseClient, switch_mode
     if not rc.MAP_PATH.exists():
@@ -63,6 +66,14 @@ def main() -> int:
         return 2
     rig_map = rc.RigMap.load(rc.MAP_PATH)
     plane = rig_map.plane
+    planner = InterceptPlanner(plane, rig_map.frame, jaw_height=args.height / 1000, max_joint_speed=args.joint_speed)
+    if args.dry_run:
+        cfg = arm_mod.load()
+        print(f"waiting pose: the middle of the intercept line, fingertips {(planner.jaw_height + planner.hover) * 1000:.0f} mm "
+              f"above the table; catch at {planner.jaw_height * 1000:.0f} mm; base turn from the map {rig_map.frame.yaw_deg:+.0f} deg")
+        print("\n".join(arm_mod.route_lines(cfg, cfg.rest_model(), planner.q_home, "rest pose")) or
+              "no arm poses recorded (./rig calibrate, step 4): the route starts where the arm rests")
+        return 0
     try:
         cam = switch_mode(RealSenseClient(), 640, 480, 60)
     except OSError:
@@ -79,7 +90,6 @@ def main() -> int:
         print(f"  CHECK: {w}", flush=True)
     calib = camera_calib(cam, res)
     trk, clock = make_tracker(calib, rig_map), HostClock()
-    planner = InterceptPlanner(plane, rig_map.frame, jaw_height=args.height / 1000, max_joint_speed=args.joint_speed)
     gx = planner.gate_x
     proj = lambda P: calib.project(np.atleast_2d(np.asarray(P, float))).round().astype(int)
     log = {k: [] for k in ("t", "ball", "meas", "ball_px", "jaw", "q", "q_sent", "q_meas", "phase")}
@@ -87,7 +97,8 @@ def main() -> int:
     cv2.resizeWindow(WIN, cam.width * 2, cam.height * 2)
     try:
         print(f"control: {args.control}", flush=True)
-        with arm_mod.powered(speed=BACKSTOP * args.joint_speed, grip=args.grip or None, control=args.control) as arm:
+        with arm_mod.powered(speed=BACKSTOP * args.joint_speed, grip=args.grip or None, control=args.control,
+                             first=planner.q_home) as arm:
             arm.go(planner.plan(trk, time.monotonic()).q)          # the waiting pose at the intercept line
             trk.reset()
             planner.reset()
