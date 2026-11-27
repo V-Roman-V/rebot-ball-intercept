@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,6 +151,7 @@ class Bus:
 
     def mit(self, m, pos, kp, kd, vel=0.0, tau=0.0):
         self.pos[m] = pos
+        self.kd = getattr(self, "kd", {}) | {m: kd}
         if m == arm_mod.ARM_IDS[-1]:
             self.sent.append(np.array([self.pos[k] for k in arm_mod.ARM_IDS]))
 
@@ -172,6 +174,27 @@ class BackstopTest(unittest.TestCase):
         target = q0 + np.radians([1.0, -0.5, 0.2, 0.0, 0.0, 0.0])
         a.command(target)
         np.testing.assert_allclose(a.last, target, atol=1e-12)
+
+
+class HoldTest(unittest.TestCase):
+    def test_damping_is_lower_while_the_target_stands_and_full_when_it_moves(self):
+        q0 = np.radians([-90.0, 87.0, 16.0, 42.0, 0.0, 0.0])
+        bus, clock = Bus(q0), SimpleNamespace(t=100.0)
+        a = arm_mod.Arm(arm_mod.ArmConfig(), bus, speed=2.0, control="mit")
+        a.last, a.t_move = q0.copy(), clock.t
+        kd = lambda: np.array([bus.kd[m] for m in arm_mod.ARM_IDS])
+        with unittest.mock.patch.object(arm_mod.time, "monotonic", lambda: clock.t):
+            for _ in range(10):                                  # 0.2 s of the same target: still the full gain
+                clock.t += 0.02
+                a.command(q0)
+            np.testing.assert_allclose(kd(), arm_mod.MIT_KD)
+            for _ in range(10):                                  # 0.4 s: holding
+                clock.t += 0.02
+                a.command(q0)
+            np.testing.assert_allclose(kd(), arm_mod.HOLD_KD * arm_mod.MIT_KD)
+            clock.t += 0.02
+            a.command(q0 + np.radians([0.5, 0, 0, 0, 0, 0]))     # it moves: the full gain at once
+            np.testing.assert_allclose(kd(), arm_mod.MIT_KD)
 
 
 if __name__ == "__main__":

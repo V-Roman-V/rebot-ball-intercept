@@ -62,6 +62,12 @@ MIT_KD = np.array([8.0, 10.0, 10.0, 4.0, 3.0, 2.5])
 TORQUE_CAP = np.array([20.0, 20.0, 20.0, 7.0, 7.0, 7.0])     # Nm, as in the sysid run
 MOTOR_TORQUE_MAX = np.array([36.0, 36.0, 36.0, 14.0, 14.0, 14.0])
 FF_RAMP = 1.0                             # s, gravity feed-forward ramps in after power-on
+# While the target stands still the damping gain is lowered: the motor multiplies kd by its own velocity
+# reading, which is noisy at rest (0.03 .. 0.09 rad/s -> 0.5 .. 0.85 N m of torque jitter on joints 1-3,
+# an audible buzz, 27 Nov 2026). A workaround until the motor's velocity can be filtered: the full
+# gain is back with the first target that moves.
+HOLD_KD = 0.3                             # fraction of MIT_KD while holding
+HOLD_AFTER = 0.3                          # s of unchanged target before it applies
 
 
 # ------------------------------------------------------------------------------------ arm.json
@@ -362,6 +368,7 @@ class Arm:
         self.enabled, self.grip_on = False, False
         self.last = None                                  # last target sent (model), for nearest()
         self.t_last = None                                # when it was sent (MIT speed limit)
+        self.t_move = None                                # when the target last changed (MIT: HOLD_KD)
         self.ff = 1.0                                     # gravity feed-forward scale (MIT)
         self.torque_orig: dict[int, float] = {}           # limit_torque before the run (MIT), restored on release
         self.gravity = Gravity() if control == "mit" else None
@@ -419,7 +426,7 @@ class Arm:
                     raise RuntimeError(f"joint {m}: limit_torque reads {lt}, not a plausible torque limit")
                 self.torque_orig[m] = lt
                 self.rs.write_param_f32(m, P_LIMIT_TORQUE, float(TORQUE_CAP[i]))
-            self.last, self.t_last, self.ff = q, None, 0.0
+            self.last, self.t_last, self.ff, self.t_move = q, None, 0.0, time.monotonic()
             self._send_mit(q)                            # the hold target goes first
             self.enabled = True
             for m in (6, 5, 4, 1, 3, 2):                 # the joints carrying the arm last
@@ -433,10 +440,10 @@ class Arm:
             self._send_mit(q)
         return q
 
-    def _send_mit(self, q) -> None:
+    def _send_mit(self, q, kd_scale: float = 1.0) -> None:
         tau = self.ff * self.gravity(q)
         for i, (m, v) in enumerate(zip(ARM_IDS, self.cfg.to_motor(q))):
-            self.rs.mit(m, float(v), float(MIT_KP[i]), float(MIT_KD[i]), 0.0, float(tau[i]))
+            self.rs.mit(m, float(v), float(MIT_KP[i]), float(kd_scale * MIT_KD[i]), 0.0, float(tau[i]))
         self._flush()
 
     def _flush(self) -> None:
@@ -467,8 +474,10 @@ class Arm:
                 if worst > self.speed * dt:
                     step *= self.speed * dt / worst
                 q = self.last + step
+            if self.last is None or self.t_move is None or float(np.abs(q - self.last).max()) > 1e-6:
+                self.t_move = now
             self.last, self.t_last = q, now
-            self._send_mit(q)
+            self._send_mit(q, HOLD_KD if now - self.t_move > HOLD_AFTER else 1.0)
             return
         self.last = q
         for m, v in zip(ARM_IDS, self.cfg.to_motor(q)):
